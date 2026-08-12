@@ -8,3 +8,4 @@ out/
 .vscode/
 run/
 logs/
+.test-server/
