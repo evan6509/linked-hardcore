@@ -5,7 +5,7 @@ import dev.linkedhardcore.fabric.death.GroupEliminator;
 import dev.linkedhardcore.fabric.death.PlayerDeathListener;
 import dev.linkedhardcore.fabric.net.ProxyMessenger;
 import dev.linkedhardcore.fabric.status.StatusFileWriter;
-import net.fabricmc.api.ModInitializer;
+import net.fabricmc.api.DedicatedServerModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
@@ -27,12 +27,12 @@ import org.slf4j.LoggerFactory;
  * <p>This mod deliberately has zero compile-time dependency on Velocity APIs;
  * it only speaks the documented plugin-messaging protocol.
  */
-public final class LinkedHardcoreMod implements ModInitializer {
+public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("linkedhardcore");
 
     @Override
-    public void onInitialize() {
+    public void onInitializeServer() {
         ModConfig config = ModConfig.load();
         LOGGER.info("[linkedhardcore] Initializing for server '{}', elimination mode {}",
             config.serverId(), config.eliminationMode());
