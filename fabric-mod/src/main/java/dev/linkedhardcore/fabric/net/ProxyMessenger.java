@@ -75,29 +75,29 @@ public final class ProxyMessenger implements TransferReadyNotifier {
      * the proxy intercepts registered channels regardless. Instead, the pending
      * ACK entry is our failure detector.
      */
-    public void sendPlayerDied(ServerPlayer player, String groupId) {
-        byte[] frame = Protocol.encodePlayerDied(player.getUUID(), groupId);
+    public void sendPlayerDied(ServerPlayer player) {
+        byte[] frame = Protocol.encodePlayerDied(player.getUUID());
         pendingAcks.put(player.getUUID(), System.currentTimeMillis());
         ServerPlayNetworking.send(player, new LinkedHardcorePayload(frame));
-        LOGGER.info("[linkedhardcore] PLAYER_DIED sent for {} (group {})", player.getName().getString(), groupId);
+        LOGGER.info("[linkedhardcore] PLAYER_DIED sent for {}", player.getName().getString());
     }
 
     /**
-     * Reports that the transfer countdown for {@code groupId} finished; the proxy
-     * may now transfer the group to the other backend.
+     * Reports that the transfer countdown finished; the proxy may now transfer
+     * everyone to the other backend.
      *
      * <p>Best-effort: requires at least one connected player to carry the frame.
-     * If nobody is connected, the proxy's transfer never fires for this group.
+     * If nobody is connected, the proxy's transfer never fires.
      */
     @Override
-    public void notifyTransferReady(MinecraftServer server, String groupId) {
-        byte[] frame = Protocol.encodeTransferReady(groupId);
+    public void notifyTransferReady(MinecraftServer server) {
+        byte[] frame = Protocol.encodeTransferReady();
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             ServerPlayNetworking.send(player, new LinkedHardcorePayload(frame));
-            LOGGER.info("[linkedhardcore] TRANSFER_READY sent for group '{}'", groupId);
+            LOGGER.info("[linkedhardcore] TRANSFER_READY sent");
             return;
         }
-        LOGGER.warn("[linkedhardcore] No connected player to carry TRANSFER_READY for group '{}'; transfer will not happen", groupId);
+        LOGGER.warn("[linkedhardcore] No connected player to carry TRANSFER_READY; transfer will not happen");
     }
 
     /**
@@ -147,10 +147,11 @@ public final class ProxyMessenger implements TransferReadyNotifier {
             }
             return;
         }
-        if (msg.isPrepareTransfer() && msg.string() != null) {
-            LOGGER.info("[linkedhardcore] PREPARE_TRANSFER received for group '{}'", msg.string());
-            transferCountdown.start(server, msg.string());
+        if (msg.isPrepareTransfer()) {
+            LOGGER.info("[linkedhardcore] PREPARE_TRANSFER received");
+            transferCountdown.start(server);
             return;
-        }        LOGGER.warn("[linkedhardcore] Dropped unrecognized proxy message: opcode=0x{}", Integer.toHexString(msg.opcode()));
+        }
+        LOGGER.warn("[linkedhardcore] Dropped unrecognized proxy message: opcode=0x{}", Integer.toHexString(msg.opcode()));
     }
 }

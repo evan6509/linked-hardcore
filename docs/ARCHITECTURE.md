@@ -40,31 +40,30 @@ becomes ready to receive the next transfer. Ping-pong forever.
 
 - **Tracks backend lifecycle.** One `ServerStatus` per backend, with an explicit
   state machine (below).
-- **Holds group membership.** `GroupRegistry` is populated from the plugin's
-  `config.json` (config-defined pairs). It is deliberately collection-based so a
-  future dynamic source (e.g. an in-game pair command) can replace the backing
-  store without touching call sites.
+- **Holds the linked player pool.** All players share one life pool — there are
+  no groups. The proxy transfers every connected player on a death.
 - **Listens on the messaging channel.** `ProxyMessageListener` handles
   `PLAYER_DIED`, `TRANSFER_READY`, and `RESET_COMPLETE` (see `PROTOCOL.md`).
 - **Routes transfers.** `TransferHandler`:
   1. ACKs the death.
   2. Sends `PREPARE_TRANSFER` to the originating server (starts the countdown).
-  3. On `TRANSFER_READY`, transfers all group members to the other backend via
-     `createConnectionRequest(...).connect()`.
+  3. On `TRANSFER_READY`, transfers every player on the proxy to the other backend
+     via `createConnectionRequest(...).connect()`.
   4. Marks the vacated server `RESETTING`.
   5. Signals the external agent via `ResetSignaller`
      (file impl: `reset.request.json`; a webhook impl is a noted alternative).
 - **Status command.** `/linkedhardcore status` (alias `/lh status`) shows
-  per-server state, groups, and who's online where.
+  per-server state and who's online.
 
 ### Fabric mod (`fabric-mod/`) — identical on both servers
 
 - **Death hook.** `PlayerDeathListener` subscribes
   `ServerLivingEntityEvents.AFTER_DEATH` (post-death, cannot be cancelled) and
-  sends `PLAYER_DIED` for players in a configured group.
-- **Countdown.** `TransferCountdown` handles `PREPARE_TRANSFER`: every online
-  group member sees an on-screen action-bar countdown, then the mod sends
-  `TRANSFER_READY` so the proxy moves the group. No spectator, no bans.
+  sends `PLAYER_DIED` for any player death.
+- **Countdown + spectator.** `TransferCountdown` handles `PREPARE_TRANSFER`: every
+  online player is set to spectator and sees an on-screen action-bar countdown,
+  then the mod sends `TRANSFER_READY` so the proxy moves everyone. On the JOIN
+  event, players arriving in spectator are respawned into survival.
 - **Reliability.** `ProxyMessenger` tracks pending `PLAYER_DIED`s; un-acked
   entries trigger a warning after `ackTimeoutSeconds` (see `PROTOCOL.md`).
 - **Status reporting.** `StatusFileWriter` writes `status.json` on lifecycle
@@ -108,13 +107,13 @@ The proxy gatekeeps both directions: it registers the channel in its
 messages from backend `ServerConnection`s — a client cannot impersonate the proxy
 to a backend, and nothing leaks to the actual client.
 
-## Duplicated pair config (known simplification)
+## Configuration (known simplification)
 
-The proxy and the mod each hold a copy of the group definitions (the mod needs
-them to know who is tracked and whom to eliminate). In the current pass this is
-acceptable — it keeps the modules independent. A future dynamic-pair pass should
-centralize membership on the proxy and push it down (e.g. via a config-sync or a
-new protocol message).
+The proxy and the mod each carry a small config file (`plugins/linkedhardcore/
+config.json` and `config/linkedhardcore/config.json`). There are no group
+definitions anywhere — all players form one linked pool, so the configs only hold
+the server id and timing options. They are intentionally separate to keep the
+modules decoupled.
 
 ## Deployment model
 
@@ -128,7 +127,6 @@ new protocol message).
 ## Future enhancements (out of scope for the initial pass)
 
 - UI/HUD elements for players (shared-life indicator, remaining lives).
-- Dynamic pair formation commands (e.g. `/pair <player>`).
 - Webhook-based `ResetSignaller` for cross-host deployments.
 - PING/PONG health-check between proxy and mods (the ACK mechanism already
   detects a dead channel on the exact event that matters).

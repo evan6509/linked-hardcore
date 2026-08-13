@@ -16,6 +16,9 @@ import java.util.UUID;
  * be mirrored in {@code velocity-plugin/.../net/Protocol.java} and documented in
  * {@code docs/PROTOCOL.md}.
  *
+ * <p>All players form a single linked life pool — there are no groups, so the
+ * messages carry no group identifier.
+ *
  * <p>Encoding follows Minecraft conventions (matches the plugin's {@code Protocol}):
  * <ul>
  *   <li>Integers are big-endian.</li>
@@ -30,11 +33,9 @@ import java.util.UUID;
  *  [0x01] PLAYER_DIED       mod -> proxy
  *      byte  opcode = 0x01
  *      byte[16] playerUuid
- *      varint + utf8  groupId
  *
  *  [0x02] PREPARE_TRANSFER  proxy -> mod
  *      byte  opcode = 0x02
- *      varint + utf8  groupId
  *
  *  [0x03] RESET_COMPLETE    mod -> proxy
  *      byte  opcode = 0x03
@@ -46,7 +47,6 @@ import java.util.UUID;
  *
  *  [0x05] TRANSFER_READY    mod -> proxy
  *      byte  opcode = 0x05
- *      varint + utf8  groupId
  * </pre>
  */
 public final class Protocol {
@@ -65,13 +65,12 @@ public final class Protocol {
 
     // ---- Encoders (mod -> proxy) ---------------------------------------------
 
-    /** PLAYER_DIED: opcode + 16-byte UUID + varint-string groupId. */
-    public static byte[] encodePlayerDied(UUID playerUuid, String groupId) {
+    /** PLAYER_DIED: opcode + 16-byte UUID. */
+    public static byte[] encodePlayerDied(UUID playerUuid) {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
         buf.writeByte(OP_PLAYER_DIED);
         buf.writeLong(playerUuid.getMostSignificantBits());
         buf.writeLong(playerUuid.getLeastSignificantBits());
-        buf.writeUtf(groupId);
         return drain(buf);
     }
 
@@ -83,18 +82,17 @@ public final class Protocol {
         return drain(buf);
     }
 
-    /** TRANSFER_READY: opcode + varint-string groupId. Sent after the countdown. */
-    public static byte[] encodeTransferReady(String groupId) {
+    /** TRANSFER_READY: opcode only. Sent after the countdown. */
+    public static byte[] encodeTransferReady() {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
         buf.writeByte(OP_TRANSFER_READY);
-        buf.writeUtf(groupId);
         return drain(buf);
     }
 
     // ---- Decoders (proxy -> mod) ---------------------------------------------
 
     /** Result of decoding an inbound proxy message. */
-    public record Inbound(byte opcode, UUID playerUuid, String string) {
+    public record Inbound(byte opcode, UUID playerUuid) {
         public boolean isPrepareTransfer() {
             return opcode == OP_PREPARE_TRANSFER;
         }
@@ -109,9 +107,9 @@ public final class Protocol {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
         byte opcode = buf.readByte();
         return switch (opcode) {
-            case OP_PREPARE_TRANSFER -> new Inbound(opcode, null, buf.readUtf());
-            case OP_ACK -> new Inbound(opcode, buf.readUUID(), null);
-            default -> new Inbound(opcode, null, null);
+            case OP_PREPARE_TRANSFER -> new Inbound(opcode, null);
+            case OP_ACK -> new Inbound(opcode, buf.readUUID());
+            default -> new Inbound(opcode, null);
         };
     }
 

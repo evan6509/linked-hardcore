@@ -45,35 +45,37 @@ All integers are big-endian.
 
 ## Messages
 
+> All players on both backends form a **single linked life pool** — there are no
+> groups, so the messages carry no group identifier.
+
 ### `PLAYER_DIED` — opcode `0x01` (mod → proxy)
 
-Sent when a member of a tracked group dies on this server.
+Sent when any player dies on this server.
 
 ```
 byte[1]   opcode = 0x01
 byte[16]  playerUuid (the player who died)
-varint    groupId (the shared-life group they belong to)
 ```
 
 Proxy behaviour (`TransferHandler#onPlayerDied`):
-1. Replies `ACK` on the same connection (unconditionally, even for unknown groups).
-2. If the group is known, sends `PREPARE_TRANSFER` back to the originating server.
+1. Replies `ACK` on the same connection (unconditionally).
+2. Sends `PREPARE_TRANSFER` back to the originating server.
 3. Waits for `TRANSFER_READY` (sent after the mod's on-screen countdown), then
-   transfers every online group member to the other backend server.
+   transfers every player on the proxy to the other backend server.
 4. Flags the vacated server for reset.
 
 ### `PREPARE_TRANSFER` — opcode `0x02` (proxy → mod)
 
-Tells the Fabric mod to start the on-screen transfer countdown for the group.
+Tells the Fabric mod to spectate everyone on this server and start the on-screen
+transfer countdown.
 
 ```
 byte[1]   opcode = 0x02
-varint    groupId
 ```
 
-The mod shows a countdown in the action bar to every online member of the group
-on this server. Nobody is set to spectator and nobody is banned — the countdown
-is purely a heads-up before the proxy moves the whole group.
+The mod sets every online player to spectator and shows a countdown in the action
+bar. When it finishes, the mod sends `TRANSFER_READY`; the proxy then moves
+everyone. Players respawn into play (survival) on arrival at the other server.
 
 ### `RESET_COMPLETE` — opcode `0x03` (mod → proxy)
 
@@ -103,18 +105,16 @@ byte[16]  playerUuid (the player from the PLAYER_DIED being acked)
 
 ### `TRANSFER_READY` — opcode `0x05` (mod → proxy)
 
-Sent when the on-screen countdown for a group finishes; signals the proxy to
-transfer the group now.
+Sent when the on-screen countdown finishes; signals the proxy to transfer everyone
+now.
 
 ```
 byte[1]   opcode = 0x05
-varint    groupId
 ```
 
-Proxy behaviour (`TransferHandler#onTransferReady`): resolves the group, transfers
-every online group member to the OTHER backend (whichever is not the sender),
-marks the sender `RESETTING` and the destination `LIVE`, and flags the vacated
-server for reset.
+Proxy behaviour (`TransferHandler#onTransferReady`): transfers every player on the
+proxy to the OTHER backend (whichever is not the sender), marks the sender
+`RESETTING` and the destination `LIVE`, and flags the vacated server for reset.
 
 ## Reliability / failure detection
 

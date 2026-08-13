@@ -4,7 +4,6 @@ import com.velocitypowered.api.command.CommandSource;
 import com.velocitypowered.api.command.SimpleCommand;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.linkedhardcore.velocity.config.PluginConfig;
-import dev.linkedhardcore.velocity.model.GroupRegistry;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -14,20 +13,19 @@ import java.util.Map;
 
 /**
  * {@code /linkedhardcore status} — quick debugging view of the proxy's view of
- * the world: per-server state, groups, and who's online where.
+ * the world: per-server state and who's online.
+ *
+ * <p>All players share one linked life pool, so there are no groups to list.
  */
 public final class StatusCommand implements SimpleCommand {
 
     private final ProxyServer proxy;
     private final PluginConfig config;
-    private final GroupRegistry groups;
     private final Map<String, ServerStatus> servers;
 
-    public StatusCommand(ProxyServer proxy, PluginConfig config, GroupRegistry groups,
-                         Map<String, ServerStatus> servers) {
+    public StatusCommand(ProxyServer proxy, PluginConfig config, Map<String, ServerStatus> servers) {
         this.proxy = proxy;
         this.config = config;
-        this.groups = groups;
         this.servers = servers;
     }
 
@@ -48,19 +46,7 @@ public final class StatusCommand implements SimpleCommand {
                 .append(Component.text(" | " + online + " online").color(NamedTextColor.DARK_GRAY)));
         });
 
-        source.sendMessage(Component.text("--- Groups ---").color(NamedTextColor.AQUA));
-        if (groups.all().isEmpty()) {
-            source.sendMessage(Component.text("  (none configured)").color(NamedTextColor.DARK_GRAY));
-        } else {
-            groups.all().forEach(g -> {
-                int online = (int) g.members().stream().filter(m -> proxy.getPlayer(m).isPresent()).count();
-                source.sendMessage(Component.text("  " + g.id() + ": " + g.members().size() + " member(s), ")
-                    .color(NamedTextColor.GRAY)
-                    .append(Component.text(online + " online").color(online > 0 ? NamedTextColor.GREEN : NamedTextColor.DARK_GRAY)));
-            });
-        }
-
-        source.sendMessage(Component.text("--- Proxy ---").color(NamedTextColor.AQUA));
+        source.sendMessage(Component.text("--- Linked pool ---").color(NamedTextColor.AQUA));
         source.sendMessage(Component.text("  " + proxy.getPlayerCount() + " player(s) on proxy")
             .color(NamedTextColor.GRAY));
     }

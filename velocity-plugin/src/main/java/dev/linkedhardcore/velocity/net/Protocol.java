@@ -20,6 +20,9 @@ import java.util.UUID;
  * Any change here MUST be mirrored in {@code fabric-mod/.../net/Protocol.java}
  * and documented in {@code docs/PROTOCOL.md}.
  *
+ * <p>All players form a single linked life pool — there are no groups, so the
+ * messages carry no group identifier.
+ *
  * <p>Encoding follows Minecraft conventions:
  * <ul>
  *   <li>Integers are big-endian.</li>
@@ -35,11 +38,9 @@ import java.util.UUID;
  *  [0x01] PLAYER_DIED      mod -> proxy
  *      byte  opcode = 0x01
  *      byte[16] playerUuid
- *      varint + utf8  groupId
  *
  *  [0x02] PREPARE_TRANSFER proxy -> mod
  *      byte  opcode = 0x02
- *      varint + utf8  groupId
  *
  *  [0x03] RESET_COMPLETE   mod -> proxy
  *      byte  opcode = 0x03
@@ -51,7 +52,6 @@ import java.util.UUID;
  *
  *  [0x05] TRANSFER_READY   mod -> proxy
  *      byte  opcode = 0x05
- *      varint + utf8  groupId
  * </pre>
  */
 public final class Protocol {
@@ -69,7 +69,7 @@ public final class Protocol {
     }
 
     /** A decoded inbound message from a backend server. */
-    public record Inbound(byte opcode, UUID playerUuid, String groupIdOrServerId) {
+    public record Inbound(byte opcode, UUID playerUuid, String serverId) {
         public boolean isPlayerDied() {
             return opcode == OP_PLAYER_DIED;
         }
@@ -92,19 +92,9 @@ public final class Protocol {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
             byte opcode = in.readByte();
             return switch (opcode) {
-                case OP_PLAYER_DIED -> {
-                    UUID playerUuid = readUuid(in);
-                    String groupId = readString(in);
-                    yield Optional.of(new Inbound(opcode, playerUuid, groupId));
-                }
-                case OP_RESET_COMPLETE -> {
-                    String serverId = readString(in);
-                    yield Optional.of(new Inbound(opcode, null, serverId));
-                }
-                case OP_TRANSFER_READY -> {
-                    String groupId = readString(in);
-                    yield Optional.of(new Inbound(opcode, null, groupId));
-                }
+                case OP_PLAYER_DIED -> Optional.of(new Inbound(opcode, readUuid(in), null));
+                case OP_RESET_COMPLETE -> Optional.of(new Inbound(opcode, null, readString(in)));
+                case OP_TRANSFER_READY -> Optional.of(new Inbound(opcode, null, null));
                 default -> {
                     // Unknown opcode — protocol drift between mod and plugin. Surface it rather than silently ignore.
                     yield Optional.empty();
@@ -116,10 +106,9 @@ public final class Protocol {
     }
 
     /** Encodes PREPARE_TRANSFER (proxy -> mod). */
-    public static byte[] encodePrepareTransfer(String groupId) {
+    public static byte[] encodePrepareTransfer() {
         ByteArrayDataOutput out = ByteStreams.newDataOutput();
         out.writeByte(OP_PREPARE_TRANSFER);
-        writeString(out, groupId);
         return out.toByteArray();
     }
 

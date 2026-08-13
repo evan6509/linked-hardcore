@@ -10,7 +10,6 @@ import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.linkedhardcore.velocity.command.StatusCommand;
 import dev.linkedhardcore.velocity.config.PluginConfig;
-import dev.linkedhardcore.velocity.model.GroupRegistry;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import dev.linkedhardcore.velocity.net.Protocol;
@@ -74,25 +73,22 @@ public final class LinkedHardcorePlugin {
             serverStatuses.put(name, new ServerStatus(name, ServerState.READY)));
         this.servers = serverStatuses;
 
-        GroupRegistry groupRegistry = new GroupRegistry(config);
-        groupRegistry.logSummary(logger);
-
         ResetSignaller resetSignaller = new FileResetSignaller(config, logger);
-        this.transferHandler = new TransferHandler(proxy, config, groupRegistry, servers, resetSignaller, logger);
+        this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger);
 
         proxy.getEventManager().register(this, new ProxyMessageListener(transferHandler, logger));
 
-        registerCommand(config, groupRegistry);
+        registerCommand(config);
 
         logger.info("[linkedhardcore] Linked Hardcore initialized. Backends: {}", servers.keySet());
     }
 
-    private void registerCommand(PluginConfig config, GroupRegistry groupRegistry) {
+    private void registerCommand(PluginConfig config) {
         CommandMeta meta = proxy.getCommandManager().metaBuilder("linkedhardcore")
             .aliases("lh")
             .plugin(this)
             .build();
-        proxy.getCommandManager().register(meta, new StatusCommand(proxy, config, groupRegistry, servers));
+        proxy.getCommandManager().register(meta, new StatusCommand(proxy, config, servers));
     }
 
     @Subscribe

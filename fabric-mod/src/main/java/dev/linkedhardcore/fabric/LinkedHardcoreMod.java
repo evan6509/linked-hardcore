@@ -18,9 +18,10 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Responsibilities (all reporting, no world mutation):
  * <ul>
- *   <li>Notify the proxy of tracked player deaths (PLAYER_DIED).</li>
- *   <li>Run the on-screen transfer countdown on PREPARE_TRANSFER, then signal
- *       TRANSFER_READY so the proxy moves the group.</li>
+ *   <li>Notify the proxy of any player death (PLAYER_DIED).</li>
+ *   <li>On PREPARE_TRANSFER, spectate everyone and run the on-screen countdown,
+ *       then signal TRANSFER_READY so the proxy moves everyone.</li>
+ *   <li>Respawn players into survival when they join after a transfer.</li>
  *   <li>Write {@code status.json} for the external reset agent + proxy to poll.</li>
  *   <li>Report RESET_COMPLETE once ready again after a reset.</li>
  * </ul>
@@ -43,7 +44,7 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
         StatusFileWriter statusWriter = new StatusFileWriter(config);
 
         messenger.register();
-        new PlayerDeathListener(config, messenger).register();
+        new PlayerDeathListener(messenger).register();
 
         // status.json lifecycle: report ready once the world is up, live once a
         // player joins, ready again when the server empties, and resetting when the
@@ -52,8 +53,11 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
             statusWriter.write("ready", server.getPlayerCount());
             LOGGER.info("[linkedhardcore] Server started; state=ready");
         });
-        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
-            statusWriter.write("live", server.getPlayerCount()));
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
+            // Players arrive as spectator after a transfer; respawn them into play.
+            transferCountdown.respawnOnJoin(handler.player);
+            statusWriter.write("live", server.getPlayerCount());
+        });
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             int count = server.getPlayerCount();
             statusWriter.write(count == 0 ? "ready" : "live", count);

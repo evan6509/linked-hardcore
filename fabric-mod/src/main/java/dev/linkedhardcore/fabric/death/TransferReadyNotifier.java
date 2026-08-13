@@ -9,6 +9,6 @@ import net.minecraft.server.MinecraftServer;
  */
 public interface TransferReadyNotifier {
 
-    /** Tells the proxy the countdown for {@code groupId} finished. */
-    void notifyTransferReady(MinecraftServer server, String groupId);
+    /** Tells the proxy the countdown finished; it may transfer everyone now. */
+    void notifyTransferReady(MinecraftServer server);
 }

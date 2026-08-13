@@ -53,11 +53,11 @@ public final class ProxyMessageListener {
 
         Protocol.Inbound msg = decoded.get();
         if (msg.isPlayerDied()) {
-            transferHandler.onPlayerDied(source, msg.playerUuid(), msg.groupIdOrServerId());
+            transferHandler.onPlayerDied(source, msg.playerUuid());
         } else if (msg.isTransferReady()) {
-            transferHandler.onTransferReady(source, msg.groupIdOrServerId());
+            transferHandler.onTransferReady(source);
         } else if (msg.isResetComplete()) {
-            transferHandler.onResetComplete(msg.groupIdOrServerId());
+            transferHandler.onResetComplete(msg.serverId());
         } else {
             logger.warn("[linkedhardcore] Unhandled opcode 0x{} from server '{}'",
                 Integer.toHexString(msg.opcode()), source.getServerInfo().getName());
