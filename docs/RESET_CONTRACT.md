@@ -81,10 +81,12 @@ Written by the Velocity plugin when it flags a server for reset (see
 5. **Wait** for the Fabric mod to write `status.json` with `state: "ready"`
    (the mod writes this on `SERVER_STARTED`). This is the signal that the wipe
    is complete and the server is safe to receive transfers again.
-6. **Notify the proxy**: the proxy is responsible for flipping the server back to
-   `READY` in its own state machine. It does so via `RESET_COMPLETE` (best-effort,
-   requires a connected player) **and/or** by polling `status.json` for
-   `state: "ready"` — implement at least the file-poll as the reliable path.
+6. **The proxy notices**: the proxy polls each backend's `status.json` (default
+   every 1s, configurable via `statusPollSeconds`). When a `RESETTING` server
+   reports `state: "ready"` + `playerCount: 0`, the proxy flips it back to
+   `READY` and resumes any pending transfer. `RESET_COMPLETE` (best-effort,
+   requires a connected player) is an additional, faster path with the same
+   effect.
 
 ### Explicitly NOT Sisyphus's job
 

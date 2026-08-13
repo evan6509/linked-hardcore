@@ -147,6 +147,11 @@ public final class ProxyMessenger implements TransferReadyNotifier {
             }
             return;
         }
+        if (msg.isWaitForServer()) {
+            LOGGER.info("[linkedhardcore] WAIT_FOR_SERVER received");
+            transferCountdown.waitForServer(server);
+            return;
+        }
         if (msg.isPrepareTransfer()) {
             LOGGER.info("[linkedhardcore] PREPARE_TRANSFER received");
             transferCountdown.start(server);

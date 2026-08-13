@@ -24,8 +24,8 @@ proxy does not fire `PluginMessageEvent` for it.
 - Direction is defined by Minecraft's custom-payload semantics:
   - **Mod → proxy** (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`): clientbound
     custom payload (registered in `PayloadTypeRegistry.clientboundPlay()`).
-  - **Proxy → mod** (`PREPARE_TRANSFER`, `ACK`): serverbound custom payload
-    (registered in `PayloadTypeRegistry.serverboundPlay()`).
+  - **Proxy → mod** (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`, `ACK`): serverbound custom
+    payload (registered in `PayloadTypeRegistry.serverboundPlay()`).
 - The proxy intercepts these at `PluginMessageEvent`; `getData()` returns the
   raw frame bytes exactly as described below. On the Fabric side the payload is a
   raw-byte passthrough (`LinkedHardcorePayload`) so the frame bytes are untouched.
@@ -59,9 +59,11 @@ byte[16]  playerUuid (the player who died)
 
 Proxy behaviour (`TransferHandler#onPlayerDied`):
 1. Replies `ACK` on the same connection (unconditionally).
-2. Sends `PREPARE_TRANSFER` back to the originating server.
-3. Waits for `TRANSFER_READY` (sent after the mod's on-screen countdown), then
-   transfers every player on the proxy to the other backend server.
+2. Picks a destination: the first server that is `READY` and not the source.
+   - If one exists, sends `PREPARE_TRANSFER`.
+   - If none does, sends `WAIT_FOR_SERVER` and records a pending transfer.
+3. On `TRANSFER_READY` (sent after the mod's on-screen countdown), transfers every
+   player on the proxy to the chosen destination.
 4. Flags the vacated server for reset.
 
 ### `PREPARE_TRANSFER` — opcode `0x02` (proxy → mod)
@@ -113,8 +115,18 @@ byte[1]   opcode = 0x05
 ```
 
 Proxy behaviour (`TransferHandler#onTransferReady`): transfers every player on the
-proxy to the OTHER backend (whichever is not the sender), marks the sender
-`RESETTING` and the destination `LIVE`, and flags the vacated server for reset.
+proxy to the chosen destination, marks the sender `RESETTING` and the destination
+`LIVE`, and flags the vacated server for reset.
+
+### `WAIT_FOR_SERVER` — opcode `0x06` (proxy → mod)
+
+Tells the Fabric mod that no destination server is ready yet; the mod should keep
+everyone in spectator and show "Waiting for available server" until a server
+becomes ready (the proxy then sends `PREPARE_TRANSFER`).
+
+```
+byte[1]   opcode = 0x06
+```
 
 ## Reliability / failure detection
 

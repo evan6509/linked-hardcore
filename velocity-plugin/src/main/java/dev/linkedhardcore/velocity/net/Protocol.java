@@ -52,6 +52,9 @@ import java.util.UUID;
  *
  *  [0x05] TRANSFER_READY   mod -> proxy
  *      byte  opcode = 0x05
+ *
+ *  [0x06] WAIT_FOR_SERVER  proxy -> mod
+ *      byte  opcode = 0x06
  * </pre>
  */
 public final class Protocol {
@@ -64,6 +67,7 @@ public final class Protocol {
     public static final byte OP_RESET_COMPLETE = 0x03;
     public static final byte OP_ACK = 0x04;
     public static final byte OP_TRANSFER_READY = 0x05;
+    public static final byte OP_WAIT_FOR_SERVER = 0x06;
 
     private Protocol() {
     }
@@ -109,6 +113,13 @@ public final class Protocol {
     public static byte[] encodePrepareTransfer() {
         ByteArrayDataOutput out = ByteStreams.newDataOutput();
         out.writeByte(OP_PREPARE_TRANSFER);
+        return out.toByteArray();
+    }
+
+    /** Encodes WAIT_FOR_SERVER (proxy -> mod): no destination server is ready yet. */
+    public static byte[] encodeWaitForServer() {
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(OP_WAIT_FOR_SERVER);
         return out.toByteArray();
     }
 

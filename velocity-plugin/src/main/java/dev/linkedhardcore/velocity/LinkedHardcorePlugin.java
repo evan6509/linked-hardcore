@@ -17,6 +17,7 @@ import dev.linkedhardcore.velocity.net.ProxyMessageListener;
 import dev.linkedhardcore.velocity.reset.FileResetSignaller;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
 import dev.linkedhardcore.velocity.routing.TransferHandler;
+import dev.linkedhardcore.velocity.status.StatusPoller;
 import org.slf4j.Logger;
 
 import java.io.IOException;
@@ -27,15 +28,15 @@ import java.util.Map;
 /**
  * Velocity plugin for Linked Hardcore.
  *
- * <p>Tracks the lifecycle of the two backend servers (which is live vs
- * resetting), holds shared-life group membership, and routes group elimination +
- * server switching based on {@code PLAYER_DIED} events from the Fabric mods.
+ * <p>Tracks the lifecycle of the backend servers (which is live vs resetting),
+ * routes transfer of the whole linked player pool, and polls each backend's
+ * status file so transfers only happen once a server is ready.
  */
 @Plugin(
     id = "linkedhardcore",
     name = "Linked Hardcore",
     version = "0.1.0",
-    description = "Paired-server hardcore: shared-life groups across two Fabric backends behind Velocity.",
+    description = "Linked life pool across multiple Fabric backends behind Velocity.",
     authors = {"linked-hardcore"}
 )
 public final class LinkedHardcorePlugin {
@@ -46,6 +47,7 @@ public final class LinkedHardcorePlugin {
 
     private Map<String, ServerStatus> servers;
     private TransferHandler transferHandler;
+    private StatusPoller statusPoller;
 
     @Inject
     public LinkedHardcorePlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -80,6 +82,10 @@ public final class LinkedHardcorePlugin {
 
         registerCommand(config);
 
+        // Poll each backend's status.json so transfers only fire once a server is ready.
+        this.statusPoller = new StatusPoller(this, proxy, config, servers, transferHandler, logger);
+        statusPoller.start();
+
         logger.info("[linkedhardcore] Linked Hardcore initialized. Backends: {}", servers.keySet());
     }
 
@@ -93,6 +99,9 @@ public final class LinkedHardcorePlugin {
 
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        if (statusPoller != null) {
+            statusPoller.stop();
+        }
         logger.info("[linkedhardcore] Shutting down.");
     }
 }

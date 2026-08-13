@@ -17,7 +17,7 @@ import java.util.Optional;
  * Proxy-side configuration, loaded from {@code plugins/linkedhardcore/config.json}.
  *
  * <p>All players form a single linked life pool, so there are no group
- * definitions here — just the two backend servers.
+ * definitions here — just the backend servers (any number of them).
  *
  * <p>Example:
  * <pre>{@code
@@ -25,25 +25,35 @@ import java.util.Optional;
  *   "backendServers": {
  *     "a": { "serverId": "a", "statusFile": "run/server-a/config/linkedhardcore/status.json" },
  *     "b": { "serverId": "b", "statusFile": "run/server-b/config/linkedhardcore/status.json" }
- *   }
+ *   },
+ *   "statusPollSeconds": 1
  * }
  * }</pre>
  *
- * <p>The {@code statusFile} path is read (poll) by the proxy to learn a reset
- * finished; the proxy writes a {@code reset.request.json} into the same
- * directory when it wants Sisyphus to wipe that server.
+ * <p>The {@code statusFile} path is polled by the proxy to learn when a reset
+ * finished (state {@code ready}); the proxy writes a {@code reset.request.json}
+ * into the same directory when it wants Sisyphus to wipe that server.
  */
 public final class PluginConfig {
 
+    private static final int DEFAULT_STATUS_POLL_SECONDS = 1;
+
     /** velocity server name -> backend config. */
     private final Map<String, BackendServer> backendServers;
+    private final int statusPollSeconds;
 
-    public PluginConfig(Map<String, BackendServer> backendServers) {
+    public PluginConfig(Map<String, BackendServer> backendServers, int statusPollSeconds) {
         this.backendServers = Map.copyOf(backendServers);
+        this.statusPollSeconds = statusPollSeconds > 0 ? statusPollSeconds : DEFAULT_STATUS_POLL_SECONDS;
     }
 
     public Map<String, BackendServer> backendServers() {
         return backendServers;
+    }
+
+    /** Seconds between status.json polls (1 by default). */
+    public int statusPollSeconds() {
+        return statusPollSeconds;
     }
 
     /**
@@ -72,7 +82,9 @@ public final class PluginConfig {
                 raw.backendServers.forEach((name, b) -> servers.put(name, new BackendServer(name, b.serverId, b.statusFile)));
             }
             logger.info("[linkedhardcore] Loaded proxy config: {} backend server(s)", servers.size());
-            return new PluginConfig(servers);
+            int pollSeconds = raw.statusPollSeconds != null && raw.statusPollSeconds > 0
+                ? raw.statusPollSeconds : DEFAULT_STATUS_POLL_SECONDS;
+            return new PluginConfig(servers, pollSeconds);
         } catch (JsonParseException e) {
             throw new IOException("Malformed proxy config " + configFile + ": " + e.getMessage(), e);
         }
@@ -89,6 +101,7 @@ public final class PluginConfig {
 
     private static final class JsonConfig {
         Map<String, JsonBackend> backendServers;
+        Integer statusPollSeconds;
     }
 
     private static final class JsonBackend {

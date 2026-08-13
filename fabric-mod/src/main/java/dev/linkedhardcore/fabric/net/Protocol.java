@@ -47,6 +47,9 @@ import java.util.UUID;
  *
  *  [0x05] TRANSFER_READY    mod -> proxy
  *      byte  opcode = 0x05
+ *
+ *  [0x06] WAIT_FOR_SERVER   proxy -> mod
+ *      byte  opcode = 0x06
  * </pre>
  */
 public final class Protocol {
@@ -59,6 +62,7 @@ public final class Protocol {
     public static final byte OP_RESET_COMPLETE = 0x03;
     public static final byte OP_ACK = 0x04;
     public static final byte OP_TRANSFER_READY = 0x05;
+    public static final byte OP_WAIT_FOR_SERVER = 0x06;
 
     private Protocol() {
     }
@@ -97,6 +101,10 @@ public final class Protocol {
             return opcode == OP_PREPARE_TRANSFER;
         }
 
+        public boolean isWaitForServer() {
+            return opcode == OP_WAIT_FOR_SERVER;
+        }
+
         public boolean isAck() {
             return opcode == OP_ACK;
         }
@@ -108,6 +116,7 @@ public final class Protocol {
         byte opcode = buf.readByte();
         return switch (opcode) {
             case OP_PREPARE_TRANSFER -> new Inbound(opcode, null);
+            case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null);
             case OP_ACK -> new Inbound(opcode, buf.readUUID());
             default -> new Inbound(opcode, null);
         };

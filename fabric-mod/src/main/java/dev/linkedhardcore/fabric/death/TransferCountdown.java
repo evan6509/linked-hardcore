@@ -13,27 +13,37 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Runs the on-screen "transferring" countdown after a death.
+ * Handles the post-death flow for the whole linked player pool: everyone is put
+ * into spectator, then either waits for an available server or runs the on-screen
+ * transfer countdown once one is ready.
  *
- * <p>On {@code PREPARE_TRANSFER} from the proxy, EVERY online player on this
- * server is set to spectator and sees a countdown in the action bar. When it
- * reaches zero, the mod tells the proxy via {@code TRANSFER_READY} that it may
- * transfer everyone to the other backend. Players respawn into play on arrival
- * at the destination (see {@link #respawnOnJoin}).
+ * <p>Flow:
+ * <ol>
+ *   <li>{@code WAIT_FOR_SERVER} from the proxy → spectate everyone, respawn any
+ *       dead player, and show "Waiting for available server" until told otherwise.</li>
+ *   <li>{@code PREPARE_TRANSFER} from the proxy → spectate everyone and run the
+ *       action-bar countdown. When it reaches zero, tell the proxy via
+ *       {@code TRANSFER_READY} that it may transfer everyone.</li>
+ * </ol>
  *
- * <p>The countdown is driven by wall-clock time ({@link System#currentTimeMillis})
- * sampled each server tick, so it reflects real seconds regardless of tick rate.
- * Only one countdown can be active at a time (any number of players, one pool).
+ * <p>Players respawn into normal play (survival) when they arrive at the
+ * destination ({@link #respawnOnJoin}). The countdown is driven by wall-clock
+ * time sampled each server tick.
  */
 public final class TransferCountdown {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("linkedhardcore");
 
+    private static final Component WAITING_TEXT = Component.literal("§eWaiting for available server...");
+    private static final Component COUNTDOWN_PREFIX = Component.literal("§cTransferring in §e");
+
     private final ModConfig config;
     private final TransferReadyNotifier notifier;
 
     /** Absolute end time (millis) the active countdown finishes at; null when idle. */
-    private volatile Long endTime;
+    private volatile Long countdownEnd;
+    /** Whether we are waiting for an available server (showing the waiting bar). */
+    private volatile boolean waitingForServer;
 
     public TransferCountdown(ModConfig config, TransferReadyNotifier notifier) {
         this.config = config;
@@ -41,36 +51,54 @@ public final class TransferCountdown {
     }
 
     /**
-     * Starts the countdown: spectates every online player and shows the countdown.
-     * Called on the server thread when a {@code PREPARE_TRANSFER} arrives.
+     * Enters the "waiting for an available server" state: spectates everyone,
+     * respawns any dead player, and shows the waiting message until the proxy
+     * sends PREPARE_TRANSFER. Called on the server thread.
      */
-    public void start(MinecraftServer server) {
-        long end = System.currentTimeMillis() + config.transferCountdownSeconds() * 1000L;
-        endTime = end;
-        LOGGER.info("[linkedhardcore] Starting transfer countdown ({}s); spectating {} player(s)",
-            config.transferCountdownSeconds(), server.getPlayerCount());
+    public void waitForServer(MinecraftServer server) {
+        countdownEnd = null;
+        waitingForServer = true;
+        LOGGER.info("[linkedhardcore] Waiting for an available server; spectating {} player(s)", server.getPlayerCount());
         spectateAll(server);
-        showCountdown(server, config.transferCountdownSeconds());
+        showBar(server, WAITING_TEXT);
     }
 
     /**
-     * Called on every server tick: updates the action-bar text for online players
-     * from the remaining wall-clock seconds, and fires {@code TRANSFER_READY} when
-     * the countdown finishes.
+     * Starts the transfer countdown: spectates everyone (idempotent) and runs the
+     * on-screen countdown. Called on the server thread when {@code PREPARE_TRANSFER}
+     * arrives from the proxy (i.e. a destination server is ready).
+     */
+    public void start(MinecraftServer server) {
+        waitingForServer = false;
+        countdownEnd = System.currentTimeMillis() + config.transferCountdownSeconds() * 1000L;
+        LOGGER.info("[linkedhardcore] Starting transfer countdown ({}s); spectating {} player(s)",
+            config.transferCountdownSeconds(), server.getPlayerCount());
+        spectateAll(server);
+        showBar(server, countdownText(config.transferCountdownSeconds()));
+    }
+
+    /**
+     * Called on every server tick: shows the waiting message or updates the
+     * countdown from the remaining wall-clock seconds, and fires
+     * {@code TRANSFER_READY} when the countdown finishes.
      */
     public void tick(MinecraftServer server) {
-        Long end = endTime;
+        if (waitingForServer) {
+            showBar(server, WAITING_TEXT);
+            return;
+        }
+        Long end = countdownEnd;
         if (end == null) {
             return;
         }
         long remainingMillis = end - System.currentTimeMillis();
         if (remainingMillis <= 0) {
-            endTime = null;
+            countdownEnd = null;
             LOGGER.info("[linkedhardcore] Countdown finished; notifying proxy");
             notifier.notifyTransferReady(server);
             return;
         }
-        showCountdown(server, (int) Math.ceil(remainingMillis / 1000.0));
+        showBar(server, countdownText((int) Math.ceil(remainingMillis / 1000.0)));
     }
 
     /**
@@ -91,8 +119,12 @@ public final class TransferCountdown {
         }
     }
 
-    private void showCountdown(MinecraftServer server, int remaining) {
-        Component text = Component.literal("§cTransferring in §e" + remaining + "§c...");
+    private static Component countdownText(int remaining) {
+        return COUNTDOWN_PREFIX.copy().append(Component.literal(String.valueOf(remaining)))
+            .append(Component.literal("§c..."));
+    }
+
+    private static void showBar(MinecraftServer server, Component text) {
         for (ServerPlayer player : server.getPlayerList().getPlayers()) {
             player.connection.send(new ClientboundSetActionBarTextPacket(text));
         }
