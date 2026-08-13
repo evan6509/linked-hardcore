@@ -37,7 +37,7 @@ import java.util.UUID;
  *      byte[16] playerUuid
  *      varint + utf8  groupId
  *
- *  [0x02] GROUP_ELIMINATED proxy -> mod
+ *  [0x02] PREPARE_TRANSFER proxy -> mod
  *      byte  opcode = 0x02
  *      varint + utf8  groupId
  *
@@ -48,6 +48,10 @@ import java.util.UUID;
  *  [0x04] ACK              proxy -> mod
  *      byte  opcode = 0x04
  *      byte[16] playerUuid
+ *
+ *  [0x05] TRANSFER_READY   mod -> proxy
+ *      byte  opcode = 0x05
+ *      varint + utf8  groupId
  * </pre>
  */
 public final class Protocol {
@@ -56,9 +60,10 @@ public final class Protocol {
     public static final ChannelIdentifier CHANNEL = MinecraftChannelIdentifier.from(CHANNEL_NAME);
 
     public static final byte OP_PLAYER_DIED = 0x01;
-    public static final byte OP_GROUP_ELIMINATED = 0x02;
+    public static final byte OP_PREPARE_TRANSFER = 0x02;
     public static final byte OP_RESET_COMPLETE = 0x03;
     public static final byte OP_ACK = 0x04;
+    public static final byte OP_TRANSFER_READY = 0x05;
 
     private Protocol() {
     }
@@ -71,6 +76,10 @@ public final class Protocol {
 
         public boolean isResetComplete() {
             return opcode == OP_RESET_COMPLETE;
+        }
+
+        public boolean isTransferReady() {
+            return opcode == OP_TRANSFER_READY;
         }
     }
 
@@ -92,6 +101,10 @@ public final class Protocol {
                     String serverId = readString(in);
                     yield Optional.of(new Inbound(opcode, null, serverId));
                 }
+                case OP_TRANSFER_READY -> {
+                    String groupId = readString(in);
+                    yield Optional.of(new Inbound(opcode, null, groupId));
+                }
                 default -> {
                     // Unknown opcode — protocol drift between mod and plugin. Surface it rather than silently ignore.
                     yield Optional.empty();
@@ -102,10 +115,10 @@ public final class Protocol {
         }
     }
 
-    /** Encodes GROUP_ELIMINATED (proxy -> mod). */
-    public static byte[] encodeGroupEliminated(String groupId) {
+    /** Encodes PREPARE_TRANSFER (proxy -> mod). */
+    public static byte[] encodePrepareTransfer(String groupId) {
         ByteArrayDataOutput out = ByteStreams.newDataOutput();
-        out.writeByte(OP_GROUP_ELIMINATED);
+        out.writeByte(OP_PREPARE_TRANSFER);
         writeString(out, groupId);
         return out.toByteArray();
     }

@@ -6,8 +6,7 @@ package dev.linkedhardcore.velocity.model;
  * <p>Transitions are strictly ordered (see {@link ServerStatus}):
  * <pre>
  *   READY --player joins--> LIVE
- *   LIVE  --group eliminated--> VACATING
- *   VACATING --players transferred--> RESETTING
+ *   LIVE  --group transferred out--> RESETTING
  *   RESETTING --reset complete--> READY
  * </pre>
  *
@@ -21,9 +20,6 @@ public enum ServerState {
 
     /** Currently hosting one or more active pairs. */
     LIVE,
-
-    /** A group was eliminated here; remaining members are being handled/transferred out. */
-    VACATING,
 
     /** Empty again; the external reset agent (Sisyphus) has been signalled to wipe and regenerate. */
     RESETTING;

@@ -20,8 +20,17 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Core routing: turns a {@code PLAYER_DIED} notification into a group
- * elimination + transfer, and marks the vacated server for reset.
+ * Core routing: turns a {@code PLAYER_DIED} notification into a countdown +
+ * transfer, and marks the vacated server for reset.
+ *
+ * <p>Flow:
+ * <ol>
+ *   <li>{@code PLAYER_DIED} from a backend → ACK, then tell that server to run
+ *       the on-screen transfer countdown ({@code PREPARE_TRANSFER}).</li>
+ *   <li>The Fabric mod shows the countdown, then replies {@code TRANSFER_READY}.</li>
+ *   <li>{@link #onTransferReady} transfers every group member to the OTHER backend
+ *       and flags the vacated server for reset.</li>
+ * </ol>
  */
 public final class TransferHandler {
 
@@ -48,11 +57,9 @@ public final class TransferHandler {
      * <ol>
      *   <li>ACK the originating server immediately (even for unknown groups —
      *       the mod's ack-timeout must still resolve).</li>
-     *   <li>Broadcast {@code GROUP_ELIMINATED} to the originating server so the
-     *       Fabric mod there handles remaining members.</li>
-     *   <li>Transfer every group member currently on the proxy to the OTHER
-     *       backend server.</li>
-     *   <li>Flag the vacated server for reset once all members have left.</li>
+     *   <li>Tell the originating server to run the transfer countdown
+     *       ({@code PREPARE_TRANSFER}). The mod will reply {@code TRANSFER_READY}
+     *       when the countdown finishes; the actual transfer happens there.</li>
      * </ol>
      */
     public void onPlayerDied(ServerConnection source, UUID playerUuid, String groupId) {
@@ -65,16 +72,34 @@ public final class TransferHandler {
 
         Optional<Group> groupOpt = groups.byId(groupId);
         if (groupOpt.isEmpty()) {
-            logger.warn("[linkedhardcore] Death reported for unknown group '{}' (player {}). No elimination possible.",
+            logger.warn("[linkedhardcore] Death reported for unknown group '{}' (player {}). No transfer.",
                 groupId, playerUuid);
             return;
         }
         Group group = groupOpt.get();
 
-        // 2. Tell the originating server to eliminate the rest of the group.
-        source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeGroupEliminated(group.id()));
+        // 2. Ask the originating server to run the on-screen countdown.
+        source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodePrepareTransfer(group.id()));
+        logger.info("[linkedhardcore] PREPARE_TRANSFER sent to '{}' for group '{}'", fromServerName, group.id());
+    }
 
-        // 3. Determine destination: whichever registered server is NOT the one we came from.
+    /**
+     * Handles {@code TRANSFER_READY} from a backend: the countdown for the group
+     * finished on that server, so now move every group member to the OTHER
+     * backend and flag the vacated server for reset.
+     */
+    public void onTransferReady(ServerConnection source, String groupId) {
+        String fromServerName = source.getServerInfo().getName();
+        logger.info("[linkedhardcore] TRANSFER_READY from '{}' for group '{}'", fromServerName, groupId);
+
+        Optional<Group> groupOpt = groups.byId(groupId);
+        if (groupOpt.isEmpty()) {
+            logger.warn("[linkedhardcore] TRANSFER_READY for unknown group '{}'.", groupId);
+            return;
+        }
+        Group group = groupOpt.get();
+
+        // Destination: whichever registered server is NOT the one that sent this.
         Optional<RegisteredServer> destination = findOtherBackend(fromServerName);
         if (destination.isEmpty()) {
             logger.error("[linkedhardcore] No alternate backend configured to transfer group '{}' to (from '{}').",
@@ -83,7 +108,7 @@ public final class TransferHandler {
         }
         RegisteredServer to = destination.get();
 
-        // 4. Transfer all group members currently connected to the proxy.
+        // Transfer all group members currently connected to the proxy.
         Set<Player> transferred = new HashSet<>();
         for (UUID memberUuid : group.members()) {
             Optional<Player> member = proxy.getPlayer(memberUuid);
@@ -102,8 +127,8 @@ public final class TransferHandler {
             }
         }
 
-        // 5. Mark the vacated server. The originating server is now empty (all its
-        //    group members died or transferred) -> RESETTING, and the destination is LIVE.
+        // The originating server is now empty (all its group members transferred) -> RESETTING,
+        // and the destination is LIVE.
         ServerStatus fromStatus = servers.get(fromServerName);
         ServerStatus toStatus = servers.get(to.getServerInfo().getName());
         if (fromStatus != null) {
@@ -113,7 +138,7 @@ public final class TransferHandler {
             toStatus.transition(ServerState.LIVE, logger);
         }
 
-        // 6. Signal the external agent to wipe the vacated server.
+        // Signal the external agent to wipe the vacated server.
         try {
             resetSignaller.signalReset(fromServerName);
         } catch (Exception e) {

@@ -70,7 +70,6 @@ public final class StatusCommand implements SimpleCommand {
             case "live" -> NamedTextColor.GREEN;
             case "ready" -> NamedTextColor.DARK_GREEN;
             case "resetting" -> NamedTextColor.RED;
-            case "vacating" -> NamedTextColor.YELLOW;
             default -> NamedTextColor.WHITE;
         };
     }

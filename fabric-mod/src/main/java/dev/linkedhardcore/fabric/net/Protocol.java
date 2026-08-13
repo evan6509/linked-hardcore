@@ -27,22 +27,26 @@ import java.util.UUID;
  * <pre>
  *  Channel: linkedhardcore:main
  *
- *  [0x01] PLAYER_DIED      mod -> proxy
+ *  [0x01] PLAYER_DIED       mod -> proxy
  *      byte  opcode = 0x01
  *      byte[16] playerUuid
  *      varint + utf8  groupId
  *
- *  [0x02] GROUP_ELIMINATED proxy -> mod
+ *  [0x02] PREPARE_TRANSFER  proxy -> mod
  *      byte  opcode = 0x02
  *      varint + utf8  groupId
  *
- *  [0x03] RESET_COMPLETE   mod -> proxy
+ *  [0x03] RESET_COMPLETE    mod -> proxy
  *      byte  opcode = 0x03
  *      varint + utf8  serverId
  *
- *  [0x04] ACK              proxy -> mod
+ *  [0x04] ACK               proxy -> mod
  *      byte  opcode = 0x04
  *      byte[16] playerUuid
+ *
+ *  [0x05] TRANSFER_READY    mod -> proxy
+ *      byte  opcode = 0x05
+ *      varint + utf8  groupId
  * </pre>
  */
 public final class Protocol {
@@ -51,9 +55,10 @@ public final class Protocol {
     public static final Identifier CHANNEL = Identifier.fromNamespaceAndPath("linkedhardcore", "main");
 
     public static final byte OP_PLAYER_DIED = 0x01;
-    public static final byte OP_GROUP_ELIMINATED = 0x02;
+    public static final byte OP_PREPARE_TRANSFER = 0x02;
     public static final byte OP_RESET_COMPLETE = 0x03;
     public static final byte OP_ACK = 0x04;
+    public static final byte OP_TRANSFER_READY = 0x05;
 
     private Protocol() {
     }
@@ -78,12 +83,20 @@ public final class Protocol {
         return drain(buf);
     }
 
+    /** TRANSFER_READY: opcode + varint-string groupId. Sent after the countdown. */
+    public static byte[] encodeTransferReady(String groupId) {
+        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+        buf.writeByte(OP_TRANSFER_READY);
+        buf.writeUtf(groupId);
+        return drain(buf);
+    }
+
     // ---- Decoders (proxy -> mod) ---------------------------------------------
 
     /** Result of decoding an inbound proxy message. */
     public record Inbound(byte opcode, UUID playerUuid, String string) {
-        public boolean isGroupEliminated() {
-            return opcode == OP_GROUP_ELIMINATED;
+        public boolean isPrepareTransfer() {
+            return opcode == OP_PREPARE_TRANSFER;
         }
 
         public boolean isAck() {
@@ -96,7 +109,7 @@ public final class Protocol {
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
         byte opcode = buf.readByte();
         return switch (opcode) {
-            case OP_GROUP_ELIMINATED -> new Inbound(opcode, null, buf.readUtf());
+            case OP_PREPARE_TRANSFER -> new Inbound(opcode, null, buf.readUtf());
             case OP_ACK -> new Inbound(opcode, buf.readUUID(), null);
             default -> new Inbound(opcode, null, null);
         };

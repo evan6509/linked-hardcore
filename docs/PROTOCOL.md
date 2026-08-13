@@ -22,9 +22,9 @@ proxy does not fire `PluginMessageEvent` for it.
 ## Transport & framing
 
 - Direction is defined by Minecraft's custom-payload semantics:
-  - **Mod → proxy** (`PLAYER_DIED`, `RESET_COMPLETE`): clientbound custom payload
-    (registered in `PayloadTypeRegistry.clientboundPlay()`).
-  - **Proxy → mod** (`GROUP_ELIMINATED`, `ACK`): serverbound custom payload
+  - **Mod → proxy** (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`): clientbound
+    custom payload (registered in `PayloadTypeRegistry.clientboundPlay()`).
+  - **Proxy → mod** (`PREPARE_TRANSFER`, `ACK`): serverbound custom payload
     (registered in `PayloadTypeRegistry.serverboundPlay()`).
 - The proxy intercepts these at `PluginMessageEvent`; `getData()` returns the
   raw frame bytes exactly as described below. On the Fabric side the payload is a
@@ -57,19 +57,23 @@ varint    groupId (the shared-life group they belong to)
 
 Proxy behaviour (`TransferHandler#onPlayerDied`):
 1. Replies `ACK` on the same connection (unconditionally, even for unknown groups).
-2. If the group is known, sends `GROUP_ELIMINATED` back to the originating server.
-3. Transfers every online group member to the other backend server.
+2. If the group is known, sends `PREPARE_TRANSFER` back to the originating server.
+3. Waits for `TRANSFER_READY` (sent after the mod's on-screen countdown), then
+   transfers every online group member to the other backend server.
 4. Flags the vacated server for reset.
 
-### `GROUP_ELIMINATED` — opcode `0x02` (proxy → mod)
+### `PREPARE_TRANSFER` — opcode `0x02` (proxy → mod)
 
-Tells the Fabric mod to eliminate all remaining members of the group currently
-online on this server (respecting the mod's `eliminationMode`).
+Tells the Fabric mod to start the on-screen transfer countdown for the group.
 
 ```
 byte[1]   opcode = 0x02
 varint    groupId
 ```
+
+The mod shows a countdown in the action bar to every online member of the group
+on this server. Nobody is set to spectator and nobody is banned — the countdown
+is purely a heads-up before the proxy moves the whole group.
 
 ### `RESET_COMPLETE` — opcode `0x03` (mod → proxy)
 
@@ -96,6 +100,21 @@ Acknowledges a received `PLAYER_DIED`, correlated by the original player's UUID.
 byte[1]   opcode = 0x04
 byte[16]  playerUuid (the player from the PLAYER_DIED being acked)
 ```
+
+### `TRANSFER_READY` — opcode `0x05` (mod → proxy)
+
+Sent when the on-screen countdown for a group finishes; signals the proxy to
+transfer the group now.
+
+```
+byte[1]   opcode = 0x05
+varint    groupId
+```
+
+Proxy behaviour (`TransferHandler#onTransferReady`): resolves the group, transfers
+every online group member to the OTHER backend (whichever is not the sender),
+marks the sender `RESETTING` and the destination `LIVE`, and flags the vacated
+server for reset.
 
 ## Reliability / failure detection
 

@@ -1,8 +1,8 @@
 package dev.linkedhardcore.fabric;
 
 import dev.linkedhardcore.fabric.config.ModConfig;
-import dev.linkedhardcore.fabric.death.GroupEliminator;
 import dev.linkedhardcore.fabric.death.PlayerDeathListener;
+import dev.linkedhardcore.fabric.death.TransferCountdown;
 import dev.linkedhardcore.fabric.net.ProxyMessenger;
 import dev.linkedhardcore.fabric.status.StatusFileWriter;
 import net.fabricmc.api.DedicatedServerModInitializer;
@@ -19,7 +19,8 @@ import org.slf4j.LoggerFactory;
  * <p>Responsibilities (all reporting, no world mutation):
  * <ul>
  *   <li>Notify the proxy of tracked player deaths (PLAYER_DIED).</li>
- *   <li>Handle GROUP_ELIMINATED from the proxy (eliminate remaining group members).</li>
+ *   <li>Run the on-screen transfer countdown on PREPARE_TRANSFER, then signal
+ *       TRANSFER_READY so the proxy moves the group.</li>
  *   <li>Write {@code status.json} for the external reset agent + proxy to poll.</li>
  *   <li>Report RESET_COMPLETE once ready again after a reset.</li>
  * </ul>
@@ -34,11 +35,11 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
     @Override
     public void onInitializeServer() {
         ModConfig config = ModConfig.load();
-        LOGGER.info("[linkedhardcore] Initializing for server '{}', elimination mode {}",
-            config.serverId(), config.eliminationMode());
+        LOGGER.info("[linkedhardcore] Initializing for server '{}'", config.serverId());
 
-        GroupEliminator eliminator = new GroupEliminator(config);
-        ProxyMessenger messenger = new ProxyMessenger(config, eliminator);
+        ProxyMessenger messenger = new ProxyMessenger(config);
+        TransferCountdown transferCountdown = new TransferCountdown(config, messenger);
+        messenger.setTransferCountdown(transferCountdown);
         StatusFileWriter statusWriter = new StatusFileWriter(config);
 
         messenger.register();
@@ -58,10 +59,11 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
             statusWriter.write(count == 0 ? "ready" : "live", count);
         });
 
-        // Per-tick: warn on un-acked deaths, and detect an external reset request
-        // so we can report state=resetting for Sisyphus.
+        // Per-tick: warn on un-acked deaths, advance the transfer countdown, and
+        // detect an external reset request so we can report state=resetting.
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             messenger.checkPendingAcks();
+            transferCountdown.tick(server);
             checkResetRequest(statusWriter);
         });
 

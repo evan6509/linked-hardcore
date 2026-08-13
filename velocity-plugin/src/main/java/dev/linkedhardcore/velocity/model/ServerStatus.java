@@ -65,8 +65,7 @@ public final class ServerStatus {
     private static boolean isLegal(ServerState from, ServerState to) {
         return switch (from) {
             case READY -> to == ServerState.LIVE;
-            case LIVE -> to == ServerState.VACATING || to == ServerState.READY; // READY: full evacuation without elimination
-            case VACATING -> to == ServerState.RESETTING;
+            case LIVE -> to == ServerState.RESETTING || to == ServerState.READY; // RESETTING: group transferred out; READY: full evacuation without elimination
             case RESETTING -> to == ServerState.READY;
         };
     }

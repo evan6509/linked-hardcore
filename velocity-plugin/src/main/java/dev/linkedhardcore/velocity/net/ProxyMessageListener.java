@@ -54,6 +54,8 @@ public final class ProxyMessageListener {
         Protocol.Inbound msg = decoded.get();
         if (msg.isPlayerDied()) {
             transferHandler.onPlayerDied(source, msg.playerUuid(), msg.groupIdOrServerId());
+        } else if (msg.isTransferReady()) {
+            transferHandler.onTransferReady(source, msg.groupIdOrServerId());
         } else if (msg.isResetComplete()) {
             transferHandler.onResetComplete(msg.groupIdOrServerId());
         } else {

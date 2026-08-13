@@ -1,7 +1,8 @@
 package dev.linkedhardcore.fabric.net;
 
 import dev.linkedhardcore.fabric.config.ModConfig;
-import dev.linkedhardcore.fabric.death.GroupEliminator;
+import dev.linkedhardcore.fabric.death.TransferCountdown;
+import dev.linkedhardcore.fabric.death.TransferReadyNotifier;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayNetworking;
 import net.minecraft.server.MinecraftServer;
@@ -20,8 +21,9 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <p>Two responsibilities:
  * <ol>
- *   <li>Send PLAYER_DIED (death event) and RESET_COMPLETE (after reset) to the proxy.</li>
- *   <li>Receive GROUP_ELIMINATED (kill the rest of the group) and ACK (confirmation).</li>
+ *   <li>Send PLAYER_DIED (death event), RESET_COMPLETE (after reset), and
+ *       TRANSFER_READY (countdown finished) to the proxy.</li>
+ *   <li>Receive PREPARE_TRANSFER (start the on-screen countdown) and ACK.</li>
  * </ol>
  *
  * <p><b>Reliability:</b> {@code ServerPlayNetworking#send} does NOT verify the
@@ -32,24 +34,31 @@ import java.util.concurrent.ConcurrentHashMap;
  * mod-&gt;proxy (payload registered here, channel registered on the proxy) and
  * proxy-&gt;mod (receiver registered here, proxy send).
  */
-public final class ProxyMessenger {
+public final class ProxyMessenger implements TransferReadyNotifier {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("linkedhardcore");
 
     private final ModConfig config;
-    private final GroupEliminator eliminator;
     private final Map<UUID, Long> pendingAcks = new ConcurrentHashMap<>();
+    private volatile TransferCountdown transferCountdown;
 
-    public ProxyMessenger(ModConfig config, GroupEliminator eliminator) {
+    public ProxyMessenger(ModConfig config) {
         this.config = config;
-        this.eliminator = eliminator;
+    }
+
+    /**
+     * Wires the countdown back-reference (the countdown is constructed with this
+     * messenger as its notifier). Called once during mod init.
+     */
+    public void setTransferCountdown(TransferCountdown transferCountdown) {
+        this.transferCountdown = transferCountdown;
     }
 
     /** Registers payload types + the inbound receiver. Call once during mod init. */
     public void register() {
-        // Outbound (mod -> proxy): PLAYER_DIED, RESET_COMPLETE.
+        // Outbound (mod -> proxy): PLAYER_DIED, RESET_COMPLETE, TRANSFER_READY.
         PayloadTypeRegistry.clientboundPlay().register(LinkedHardcorePayload.TYPE, LinkedHardcorePayload.STREAM_CODEC);
-        // Inbound (proxy -> mod): GROUP_ELIMINATED, ACK.
+        // Inbound (proxy -> mod): PREPARE_TRANSFER, ACK.
         PayloadTypeRegistry.serverboundPlay().register(LinkedHardcorePayload.TYPE, LinkedHardcorePayload.STREAM_CODEC);
 
         ServerPlayNetworking.registerGlobalReceiver(LinkedHardcorePayload.TYPE, (payload, context) -> {
@@ -71,6 +80,24 @@ public final class ProxyMessenger {
         pendingAcks.put(player.getUUID(), System.currentTimeMillis());
         ServerPlayNetworking.send(player, new LinkedHardcorePayload(frame));
         LOGGER.info("[linkedhardcore] PLAYER_DIED sent for {} (group {})", player.getName().getString(), groupId);
+    }
+
+    /**
+     * Reports that the transfer countdown for {@code groupId} finished; the proxy
+     * may now transfer the group to the other backend.
+     *
+     * <p>Best-effort: requires at least one connected player to carry the frame.
+     * If nobody is connected, the proxy's transfer never fires for this group.
+     */
+    @Override
+    public void notifyTransferReady(MinecraftServer server, String groupId) {
+        byte[] frame = Protocol.encodeTransferReady(groupId);
+        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+            ServerPlayNetworking.send(player, new LinkedHardcorePayload(frame));
+            LOGGER.info("[linkedhardcore] TRANSFER_READY sent for group '{}'", groupId);
+            return;
+        }
+        LOGGER.warn("[linkedhardcore] No connected player to carry TRANSFER_READY for group '{}'; transfer will not happen", groupId);
     }
 
     /**
@@ -120,11 +147,10 @@ public final class ProxyMessenger {
             }
             return;
         }
-        if (msg.isGroupEliminated() && msg.string() != null) {
-            LOGGER.info("[linkedhardcore] GROUP_ELIMINATED received for group '{}'", msg.string());
-            eliminator.eliminate(server, msg.string());
+        if (msg.isPrepareTransfer() && msg.string() != null) {
+            LOGGER.info("[linkedhardcore] PREPARE_TRANSFER received for group '{}'", msg.string());
+            transferCountdown.start(server, msg.string());
             return;
-        }
-        LOGGER.warn("[linkedhardcore] Dropped unrecognized proxy message: opcode=0x{}", Integer.toHexString(msg.opcode()));
+        }        LOGGER.warn("[linkedhardcore] Dropped unrecognized proxy message: opcode=0x{}", Integer.toHexString(msg.opcode()));
     }
 }

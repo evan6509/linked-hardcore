@@ -45,11 +45,11 @@ becomes ready to receive the next transfer. Ping-pong forever.
   future dynamic source (e.g. an in-game pair command) can replace the backing
   store without touching call sites.
 - **Listens on the messaging channel.** `ProxyMessageListener` handles
-  `PLAYER_DIED` and `RESET_COMPLETE` (see `PROTOCOL.md`).
-- **Routes eliminations.** `TransferHandler`:
+  `PLAYER_DIED`, `TRANSFER_READY`, and `RESET_COMPLETE` (see `PROTOCOL.md`).
+- **Routes transfers.** `TransferHandler`:
   1. ACKs the death.
-  2. Sends `GROUP_ELIMINATED` to the originating server.
-  3. Transfers all group members to the other backend via
+  2. Sends `PREPARE_TRANSFER` to the originating server (starts the countdown).
+  3. On `TRANSFER_READY`, transfers all group members to the other backend via
      `createConnectionRequest(...).connect()`.
   4. Marks the vacated server `RESETTING`.
   5. Signals the external agent via `ResetSignaller`
@@ -62,8 +62,9 @@ becomes ready to receive the next transfer. Ping-pong forever.
 - **Death hook.** `PlayerDeathListener` subscribes
   `ServerLivingEntityEvents.AFTER_DEATH` (post-death, cannot be cancelled) and
   sends `PLAYER_DIED` for players in a configured group.
-- **Elimination.** `GroupEliminator` handles `GROUP_ELIMINATED`: all online group
-  members are set to spectator (default) or banned, per `eliminationMode`.
+- **Countdown.** `TransferCountdown` handles `PREPARE_TRANSFER`: every online
+  group member sees an on-screen action-bar countdown, then the mod sends
+  `TRANSFER_READY` so the proxy moves the group. No spectator, no bans.
 - **Reliability.** `ProxyMessenger` tracks pending `PLAYER_DIED`s; un-acked
   entries trigger a warning after `ackTimeoutSeconds` (see `PROTOCOL.md`).
 - **Status reporting.** `StatusFileWriter` writes `status.json` on lifecycle
@@ -80,8 +81,7 @@ state. Mirrors the `status.json` states the mod reports.
 
 ```
 READY --player joins------------------> LIVE
-LIVE  --group eliminated--------------> VACATING
-VACATING --all members transferred----> RESETTING
+LIVE  --group transferred out---------> RESETTING
 RESETTING --reset complete/ready------> READY
 ```
 
@@ -90,9 +90,8 @@ Transitions:
 | From       | To          | Trigger |
 |------------|-------------|---------|
 | READY      | LIVE        | a player joins (group member arrives) |
-| LIVE       | VACATING    | a group was eliminated on this server |
+| LIVE       | RESETTING   | the group was transferred out (TRANSFER_READY) |
 | LIVE       | READY       | full evacuation without elimination |
-| VACATING   | RESETTING   | all group members transferred out |
 | RESETTING  | READY       | RESET_COMPLETE or status.json `ready` |
 
 ## The seam: plugin messaging
@@ -101,8 +100,8 @@ The two modules are **deliberately decoupled**: zero compile-time dependency on
 each other's APIs. They only communicate over `linkedhardcore:main` with a
 byte-exact protocol. See `docs/PROTOCOL.md`.
 
-- Mod → proxy: clientbound custom payloads (`PLAYER_DIED`, `RESET_COMPLETE`).
-- Proxy → mod: serverbound custom payloads (`GROUP_ELIMINATED`, `ACK`).
+- Mod → proxy: clientbound custom payloads (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`).
+- Proxy → mod: serverbound custom payloads (`PREPARE_TRANSFER`, `ACK`).
 
 The proxy gatekeeps both directions: it registers the channel in its
 `ChannelRegistrar` and sets `ForwardResult.handled()`, and it only accepts
