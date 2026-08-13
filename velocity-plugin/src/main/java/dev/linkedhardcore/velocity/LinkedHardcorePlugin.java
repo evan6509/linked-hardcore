@@ -16,6 +16,7 @@ import dev.linkedhardcore.velocity.net.Protocol;
 import dev.linkedhardcore.velocity.net.ProxyMessageListener;
 import dev.linkedhardcore.velocity.reset.FileResetSignaller;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
+import dev.linkedhardcore.velocity.routing.ServerLifecycleListener;
 import dev.linkedhardcore.velocity.routing.TransferHandler;
 import dev.linkedhardcore.velocity.status.StatusPoller;
 import org.slf4j.Logger;
@@ -79,6 +80,7 @@ public final class LinkedHardcorePlugin {
         this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger);
 
         proxy.getEventManager().register(this, new ProxyMessageListener(transferHandler, logger));
+        proxy.getEventManager().register(this, new ServerLifecycleListener(proxy, config, servers, logger));
 
         registerCommand(config);
 

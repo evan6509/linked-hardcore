@@ -60,7 +60,11 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
         });
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             int count = server.getPlayerCount();
-            statusWriter.write(count == 0 ? "ready" : "live", count);
+            // If a reset has been requested (proxy wrote reset.request.json), the
+            // server must report "resetting", not "ready", so the proxy's poller
+            // does not prematurely flip it back to READY while a wipe is pending.
+            boolean resetPending = java.nio.file.Files.isRegularFile(ModConfig.CONFIG_DIR.resolve("reset.request.json"));
+            statusWriter.write(count == 0 ? (resetPending ? "resetting" : "ready") : "live", count);
         });
 
         // Per-tick: warn on un-acked deaths, advance the transfer countdown, and

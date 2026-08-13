@@ -40,7 +40,9 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
 ### Velocity plugin (`velocity-plugin/`)
 
 - **Tracks backend lifecycle.** One `ServerStatus` per backend, with an explicit
-  state machine (below).
+  state machine (below). `ServerLifecycleListener` marks a server `LIVE` when a
+  player connects and back to `READY` when its last player leaves (a `RESETTING`
+  server is never touched this way).
 - **Holds the linked player pool.** All players share one life pool — there are
   no groups. The proxy transfers every connected player on a death.
 - **Listens on the messaging channel.** `ProxyMessageListener` handles

@@ -122,14 +122,23 @@ public final class TransferHandler {
         logger.info("[linkedhardcore] Transfer initiated for {} player(s) from '{}' to '{}'", transferred, fromServerName, destinationName);
 
         // The originating server is now empty (everyone transferred) -> RESETTING,
-        // and the destination is LIVE.
+        // and the destination is LIVE. Guarded so an unexpected transition can never
+        // abort the reset signal below.
         ServerStatus fromStatus = servers.get(fromServerName);
         ServerStatus toStatus = servers.get(destinationName);
-        if (fromStatus != null) {
-            fromStatus.transition(ServerState.RESETTING, logger);
+        try {
+            if (fromStatus != null) {
+                fromStatus.transition(ServerState.RESETTING, logger);
+            }
+        } catch (IllegalStateException e) {
+            logger.warn("[linkedhardcore] Could not mark '{}' RESETTING ({}); continuing to signal reset.", fromServerName, e.getMessage());
         }
-        if (toStatus != null) {
-            toStatus.transition(ServerState.LIVE, logger);
+        try {
+            if (toStatus != null) {
+                toStatus.transition(ServerState.LIVE, logger);
+            }
+        } catch (IllegalStateException e) {
+            logger.warn("[linkedhardcore] Could not mark '{}' LIVE ({}); continuing to signal reset.", destinationName, e.getMessage());
         }
 
         // Signal the external agent to wipe the vacated server.
