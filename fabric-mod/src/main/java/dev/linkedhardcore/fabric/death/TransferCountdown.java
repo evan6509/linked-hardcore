@@ -19,8 +19,8 @@ import java.util.concurrent.ConcurrentHashMap;
  * mod tells the proxy via {@code TRANSFER_READY} that it may transfer the group
  * to the other backend. Nobody is set to spectator and nobody is banned.
  *
- * <p>The countdown is tick-based ({@link #tick(MinecraftServer)}), driven by the
- * mod's server-tick hook so it advances even if players move between servers.
+ * <p>The countdown is driven by wall-clock time ({@link System#currentTimeMillis})
+ * sampled each server tick, so it reflects real seconds regardless of tick rate.
  */
 public final class TransferCountdown {
 
@@ -29,8 +29,8 @@ public final class TransferCountdown {
     private final ModConfig config;
     private final TransferReadyNotifier notifier;
 
-    /** groupId -> remaining seconds (integer, ticked down by {@link #tick}). */
-    private final Map<String, Integer> countdowns = new ConcurrentHashMap<>();
+    /** groupId -> absolute end time (millis) the countdown finishes at. */
+    private final Map<String, Long> endTimes = new ConcurrentHashMap<>();
 
     public TransferCountdown(ModConfig config, TransferReadyNotifier notifier) {
         this.config = config;
@@ -47,38 +47,41 @@ public final class TransferCountdown {
             LOGGER.warn("[linkedhardcore] PREPARE_TRANSFER for unknown group '{}' (not in local config)", groupId);
             return;
         }
-        countdowns.put(groupId, config.transferCountdownSeconds());
+        long end = System.currentTimeMillis() + config.transferCountdownSeconds() * 1000L;
+        endTimes.put(groupId, end);
         LOGGER.info("[linkedhardcore] Starting transfer countdown for group '{}' ({}s)",
             groupId, config.transferCountdownSeconds());
+        showCountdown(server, groupId, config.transferCountdownSeconds());
     }
 
     /**
-     * Called on every server tick: decrements active countdowns, updates the
-     * action-bar text for online members, and fires {@code TRANSFER_READY} when
+     * Called on every server tick: updates the action-bar text for online members
+     * from the remaining wall-clock seconds, and fires {@code TRANSFER_READY} when
      * a countdown finishes.
      */
     public void tick(MinecraftServer server) {
-        if (countdowns.isEmpty()) {
+        if (endTimes.isEmpty()) {
             return;
         }
-        for (Map.Entry<String, Integer> entry : countdowns.entrySet()) {
+        long now = System.currentTimeMillis();
+        for (Map.Entry<String, Long> entry : endTimes.entrySet()) {
             String groupId = entry.getKey();
-            int remaining = entry.getValue() - 1;
-            if (remaining <= 0) {
-                countdowns.remove(groupId);
+            long remainingMillis = entry.getValue() - now;
+            if (remainingMillis <= 0) {
+                endTimes.remove(groupId);
                 LOGGER.info("[linkedhardcore] Countdown finished for group '{}'; notifying proxy", groupId);
                 notifier.notifyTransferReady(server, groupId);
                 continue;
             }
-            entry.setValue(remaining);
-            showCountdown(server, groupId, remaining);
+            int remainingSeconds = (int) Math.ceil(remainingMillis / 1000.0);
+            showCountdown(server, groupId, remainingSeconds);
         }
     }
 
     private void showCountdown(MinecraftServer server, String groupId, int remaining) {
         ModConfig.Group group = config.groupById(groupId).orElse(null);
         if (group == null) {
-            countdowns.remove(groupId);
+            endTimes.remove(groupId);
             return;
         }
         Component text = Component.literal("§cTransferring in §e" + remaining + "§c...");
