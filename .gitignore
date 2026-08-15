@@ -9,3 +9,10 @@ out/
 run/
 logs/
 .test-server/
+
+# Docker / compose
+.env
+baseline-build.log
+dev-proxy/
+dev-a/
+dev-b/

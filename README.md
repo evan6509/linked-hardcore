@@ -145,6 +145,96 @@ Recommended ports (all on `127.0.0.1`):
    stop it, delete its world dirs, restart it — the proxy will flip it back to
    `READY` via `status.json`/`RESET_COMPLETE`.
 
+## Containers (Docker Compose)
+
+The repo ships a `Dockerfile` and `docker-compose.yml` that run the whole stack —
+one Velocity proxy plus two Fabric backends — with the reset loop handled by the
+container orchestrator. A **single image** runs either role; `MODE=proxy|server`
+decides at container start.
+
+### Quickstart
+
+```sh
+# 1. Build the image (this runs ./gradlew build + Fabric/Velocity installs).
+docker compose build
+
+# 2. Set the shared forwarding secret (optional; a dev default is built in).
+cp .env.example .env      # then edit FORWARDING_SECRET
+
+# 3. Start the stack.
+docker compose up -d
+
+# 4. Connect to the proxy.
+#    Minecraft server address: localhost:25577 (or ${VELOCITY_PORT})
+```
+
+The image build requires network access (gradle deps, Fabric installer + vanilla
+server jar, fabric-api, and the Velocity jar are all downloaded at build time;
+the runtime is then fully offline).
+
+### Environment variables
+
+| Variable | Default | Used by | Meaning |
+|----------|---------|---------|---------|
+| `MODE` | `server` | entrypoint | `proxy` runs Velocity, `server` runs a backend |
+| `SERVER_ID` | `a` | server | Logical id written to the mod's `config.json` (`a`/`b`) |
+| `FORWARDING_SECRET` | `linkedhardcore-dev-secret-change-me` | proxy + servers | Velocity modern-forwarding secret; injected into Velocity's secret file and FabricProxy-Lite (`FABRIC_PROXY_SECRET`) |
+| `TRANSFER_COUNTDOWN_SECONDS` | `5` | server | On-screen countdown before the group is transferred (mod `config.json`) |
+| `MC_MEMORY` | proxy `512M`, servers `3G` | both | JVM `-Xmx` |
+| `VELOCITY_PORT` | `25577` | proxy | Proxy bind port and host port mapping |
+
+`FORWARDING_SECRET` is read from `.env` (gitignored; see `.env.example`). The
+dev default works out of the box but is not secret.
+
+### How the reset loop works in containers
+
+The reset agent is the **entrypoint script**, not extra Java code — the mod and
+plugin are untouched, and the bare-metal contract in `docs/RESET_CONTRACT.md`
+still holds for external agents.
+
+1. A player dies on server A. The mod sends `PLAYER_DIED`; the proxy ACKs and, if
+   server B is `READY`, sends `PREPARE_TRANSFER`. After the countdown everyone is
+   transferred to B. The proxy marks A `RESETTING` and writes
+   `config/linkedhardcore/reset.request.json` (shared volume) next to A's
+   `status.json`.
+2. A's entrypoint watcher sees the file, stops the JVM cleanly, **deletes the
+   world dirs**, removes `reset.request.json`, and exits.
+3. `restart: unless-stopped` restarts A's container. The entrypoint re-templates
+   the configs, boots a fresh world, and the mod reports `state: "ready"`.
+4. The proxy's status poller sees `ready` + `playerCount: 0` and flips A back to
+   `READY`, ready to receive the next transfer. Ping-pong forever.
+
+Data lives in a single named volume `lh-data` (mounted at `/lh`) shared by all
+three services — each backend in `/lh/server-a` and `/lh/server-b`. The shared
+volume is what lets the proxy read `status.json` and write `reset.request.json`.
+A world is wiped **only** when a reset was requested; an ordinary restart (host
+reboot, crash) keeps the world, matching the Sisyphus contract.
+
+### Playing / operating
+
+- **Status:** attach to the proxy console (`docker attach lh-proxy` or
+  `docker compose logs -f proxy`) and run `/linkedhardcore status` (alias `/lh
+  status`) to see each server's state and who's online.
+- **Death:** when any player dies, everyone is spectated, counted down, and moved
+  to the ready server. The vacated server resets itself automatically.
+- **Full reset:** `docker compose down` removes the proxy; `down -v` also deletes
+  `lh-data` (worlds + configs) for a truly clean slate.
+- **Worlds:** the world dirs live in the volume; the mod/config are re-templated
+  on every boot, so you only need to `docker compose restart` a server to re-apply
+  changed environment variables.
+
+### Notes & caveats
+
+- Backends are only reachable on the internal compose network
+  (`server-a:25565` / `server-b:25565`); only the proxy port is published.
+- `depends_on: proxy` only orders the initial `docker compose up`; it does not
+  gate the reset loop, which uses per-container restart policies.
+- The runtime image uses a JDK (not a JRE) for maximum compatibility with the
+  Fabric server; swap the base image to `eclipse-temurin:25-jre` if you want a
+  smaller proxy-only image.
+- Containers run as root for simplicity with the shared volume; hardening this
+  to a non-root user is future work.
+
 ## Verifying the one-jar bundle
 
 The built mod jar must contain FabricProxy-Lite nested:

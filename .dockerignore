@@ -1,0 +1,25 @@
+# Build context exclusions for the Dockerfile build stage.
+.git
+.gradle/
+build/
+fabric-mod/build/
+velocity-plugin/build/
+out/
+logs/
+run/
+*.log
+baseline-build.log
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.iml
+*.ipr
+*.iws
+dev-proxy/
+dev-a/
+dev-b/
+.test-server/
+Dockerfile
+docker-compose.yml

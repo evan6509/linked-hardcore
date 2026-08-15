@@ -1,0 +1,82 @@
+# Linked Hardcore — one proxy + two Fabric backends sharing a single life pool.
+#
+# Quickstart:
+#   cp .env.example .env          # set FORWARDING_SECRET (or use the dev default)
+#   docker compose up --build -d
+#   # connect to localhost:${VELOCITY_PORT:-25577}
+#
+# The reset loop:
+#   A death -> the proxy transfers everyone to the ready server and writes
+#   reset.request.json into the vacated server's config dir. That server's
+#   entrypoint kills the JVM, wipes the world, and exits. `restart: unless-stopped`
+#   restarts the container, which boots a fresh world and reports `ready` again.
+#
+# Storage: a single named volume `lh-data` is shared by all three services and
+# mounted at /lh. Each backend lives in /lh/server-a and /lh/server-b (world +
+# config). Sharing one volume lets the proxy read each backend's status.json and
+# write reset.request.json — that file channel IS the Sisyphus contract. Named
+# volumes (not tmpfs) are required: the reset loop restarts the *same* container
+# repeatedly, so the world + config must survive container restarts while the
+# entrypoint deliberately wipes only on a reset request.
+#
+# Networking: backends are reachable only on the compose bridge network
+# (server-a:25565 / server-b:25565) and are not exposed to the host.
+
+name: linked-hardcore
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: linked-hardcore:0.1.0
+    container_name: lh-proxy
+    environment:
+      MODE: proxy
+      FORWARDING_SECRET: ${FORWARDING_SECRET:-linkedhardcore-dev-secret-change-me}
+      MC_MEMORY: ${MC_MEMORY:-512M}
+      VELOCITY_PORT: ${VELOCITY_PORT:-25577}
+    ports:
+      - "${VELOCITY_PORT:-25577}:25577"
+    volumes:
+      - lh-data:/lh
+    restart: unless-stopped
+
+  server-a:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: linked-hardcore:0.1.0
+    container_name: lh-server-a
+    depends_on:
+      - proxy
+    environment:
+      MODE: server
+      SERVER_ID: a
+      FORWARDING_SECRET: ${FORWARDING_SECRET:-linkedhardcore-dev-secret-change-me}
+      MC_MEMORY: ${MC_MEMORY:-3G}
+      TRANSFER_COUNTDOWN_SECONDS: ${TRANSFER_COUNTDOWN_SECONDS:-5}
+    volumes:
+      - lh-data:/lh
+    restart: unless-stopped
+
+  server-b:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: linked-hardcore:0.1.0
+    container_name: lh-server-b
+    depends_on:
+      - proxy
+    environment:
+      MODE: server
+      SERVER_ID: b
+      FORWARDING_SECRET: ${FORWARDING_SECRET:-linkedhardcore-dev-secret-change-me}
+      MC_MEMORY: ${MC_MEMORY:-3G}
+      TRANSFER_COUNTDOWN_SECONDS: ${TRANSFER_COUNTDOWN_SECONDS:-5}
+    volumes:
+      - lh-data:/lh
+    restart: unless-stopped
+
+volumes:
+  lh-data:
