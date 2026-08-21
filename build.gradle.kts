@@ -28,4 +28,17 @@ subprojects {
             attributes["Implementation-Version"] = project.version
         }
     }
+
+    dependencies {
+        testImplementation(platform("org.junit:junit-bom:5.11.4"))
+        testImplementation("org.junit.jupiter:junit-jupiter")
+        testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    }
+
+    tasks.withType<Test>().configureEach {
+        useJUnitPlatform()
+        // Mockito's current Byte Buddy release needs this opt-in while running
+        // against the Java 25 toolchain required by Minecraft 26.2.
+        jvmArgs("-Dnet.bytebuddy.experimental=true")
+    }
 }

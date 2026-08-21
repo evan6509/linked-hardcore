@@ -62,11 +62,32 @@ public final class ServerStatus {
         }
     }
 
+    /**
+     * Attempts a legal transition without throwing when another event won a
+     * concurrent transition race or the transition is no longer appropriate.
+     */
+    public boolean tryTransition(ServerState next, Logger logger) {
+        while (true) {
+            ServerState current = state.get();
+            if (current == next || !isLegal(current, next)) {
+                return false;
+            }
+            if (state.compareAndSet(current, next)) {
+                logger.info("[linkedhardcore] Server '{}': {} -> {}", serverId, current.wireName(), next.wireName());
+                return true;
+            }
+        }
+    }
+
     private static boolean isLegal(ServerState from, ServerState to) {
         return switch (from) {
-            case READY -> to == ServerState.LIVE;
-            case LIVE -> to == ServerState.RESETTING || to == ServerState.READY; // RESETTING: group transferred out; READY: full evacuation without elimination
-            case RESETTING -> to == ServerState.READY;
+            case UNAVAILABLE -> to == ServerState.READY || to == ServerState.LIVE || to == ServerState.RESETTING;
+            case READY -> to == ServerState.LIVE || to == ServerState.RESETTING || to == ServerState.UNAVAILABLE;
+            case LIVE -> to == ServerState.TRANSFERRING || to == ServerState.READY || to == ServerState.RESETTING
+                || to == ServerState.UNAVAILABLE;
+            case TRANSFERRING -> to == ServerState.RESETTING || to == ServerState.LIVE || to == ServerState.READY
+                || to == ServerState.UNAVAILABLE;
+            case RESETTING -> to == ServerState.READY || to == ServerState.UNAVAILABLE;
         };
     }
 

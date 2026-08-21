@@ -1,6 +1,7 @@
 package dev.linkedhardcore.fabric.config;
 
 import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
 import com.google.gson.JsonParseException;
 import net.fabricmc.loader.api.FabricLoader;
 
@@ -8,6 +9,7 @@ import java.io.IOException;
 import java.io.Reader;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Mod-side configuration, loaded from {@code config/linkedhardcore/config.json}.
@@ -26,6 +28,8 @@ import java.nio.file.Path;
  * }</pre>
  */
 public final class ModConfig {
+
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
     public static final Path CONFIG_DIR = FabricLoader.getInstance().getConfigDir().resolve("linkedhardcore");
     public static final Path CONFIG_FILE = CONFIG_DIR.resolve("config.json");
@@ -56,26 +60,36 @@ public final class ModConfig {
     /** Loads config, throwing with a clear message if missing or malformed. */
     public static ModConfig load() {
         if (!Files.isRegularFile(CONFIG_FILE)) {
-            throw new IllegalStateException(
-                "Missing config file " + CONFIG_FILE + ". Create it (see README).");
+            writeDefaultConfig();
+            return new ModConfig("change-me", 10, 5);
         }
         try (Reader reader = Files.newBufferedReader(CONFIG_FILE)) {
-            JsonConfig raw = new Gson().fromJson(reader, JsonConfig.class);
+            JsonConfig raw = GSON.fromJson(reader, JsonConfig.class);
             if (raw == null) {
                 throw new JsonParseException("empty file");
             }
-            String serverId = raw.serverId != null ? raw.serverId : "unknown";
+            String serverId = raw.serverId != null ? raw.serverId : "change-me";
             int ackTimeout = raw.ackTimeoutSeconds != null ? raw.ackTimeoutSeconds : 10;
             int countdown = raw.transferCountdownSeconds != null ? raw.transferCountdownSeconds : 5;
+            if (serverId.isBlank() || ackTimeout <= 0 || countdown < 0) {
+                throw new IllegalStateException("serverId must be non-blank, ackTimeoutSeconds must be positive, "
+                    + "and transferCountdownSeconds cannot be negative");
+            }
             return new ModConfig(serverId, ackTimeout, countdown);
         } catch (IOException | JsonParseException e) {
             throw new IllegalStateException("Malformed mod config " + CONFIG_FILE + ": " + e.getMessage(), e);
         }
     }
 
-    private static final class JsonConfig {
-        String serverId;
-        Integer ackTimeoutSeconds;
-        Integer transferCountdownSeconds;
+    private static void writeDefaultConfig() {
+        try {
+            Files.createDirectories(CONFIG_DIR);
+            Files.writeString(CONFIG_FILE, GSON.toJson(new JsonConfig("change-me", 10, 5)), StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not create mod config " + CONFIG_FILE + ": " + e.getMessage(), e);
+        }
+    }
+
+    private record JsonConfig(String serverId, Integer ackTimeoutSeconds, Integer transferCountdownSeconds) {
     }
 }

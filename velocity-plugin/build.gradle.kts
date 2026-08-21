@@ -16,6 +16,10 @@ dependencies {
     // Gson is bundled with Velocity at runtime; we only need it at compile time
     // to read/write the plugin's config.json and reset signal files.
     compileOnly("com.google.code.gson:gson:2.11.0")
+
+    testImplementation("com.velocitypowered:velocity-api:${property("velocity_version")}")
+    testImplementation("org.mockito:mockito-core:5.15.2")
+    testRuntimeOnly("org.slf4j:slf4j-simple:2.0.16")
 }
 
 // The velocity-api annotation processor emits velocity-plugin.json into

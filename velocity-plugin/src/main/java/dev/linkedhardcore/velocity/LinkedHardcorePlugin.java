@@ -70,10 +70,12 @@ public final class LinkedHardcorePlugin {
             return;
         }
 
-        // One state machine per configured backend server, initialised READY.
+        // A backend is not routable until its fresh status.json reports that it
+        // is ready. This prevents a proxy restart from routing players to a
+        // server that is offline or still resetting.
         Map<String, ServerStatus> serverStatuses = new LinkedHashMap<>();
         config.backendServers().keySet().forEach(name ->
-            serverStatuses.put(name, new ServerStatus(name, ServerState.READY)));
+            serverStatuses.put(name, new ServerStatus(name, ServerState.UNAVAILABLE)));
         this.servers = serverStatuses;
 
         ResetSignaller resetSignaller = new FileResetSignaller(config, logger);

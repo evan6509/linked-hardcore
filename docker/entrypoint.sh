@@ -48,6 +48,12 @@ wipe_world() {
     done
 }
 
+reset_is_safe() {
+    local data_dir="$1"
+    local status_file="$data_dir/config/linkedhardcore/status.json"
+    [ -f "$status_file" ] && jq -e '.state == "resetting" and .playerCount == 0' "$status_file" >/dev/null 2>&1
+}
+
 ensure_eula() {
     local eula="$1/eula.txt"
     if [ ! -f "$eula" ]; then
@@ -126,7 +132,7 @@ run_server() {
     # for the server exiting on its own. Either way we exit; the docker restart
     # policy is the orchestrator that brings the container back.
     while true; do
-        if [ -f "$reset_file" ]; then
+        if [ -f "$reset_file" ] && reset_is_safe "$data_dir"; then
             log "reset requested; stopping server JVM"
             kill -TERM "$server_pid" 2>/dev/null || true
             wait "$server_pid" 2>/dev/null || true
@@ -134,6 +140,8 @@ run_server() {
             rm -f "$reset_file"
             log "world wiped; exiting for restart"
             exit 0
+        elif [ -f "$reset_file" ]; then
+            log "reset requested but players are still present; waiting for a safe status"
         fi
         if ! kill -0 "$server_pid" 2>/dev/null; then
             local code=0
@@ -224,7 +232,8 @@ EOF
     "a": { "serverId": "a", "statusFile": "/lh/server-a/config/linkedhardcore/status.json" },
     "b": { "serverId": "b", "statusFile": "/lh/server-b/config/linkedhardcore/status.json" }
   },
-  "statusPollSeconds": 1
+  "statusPollSeconds": 1,
+  "statusStaleSeconds": 5
 }
 EOF
     log "wrote $PROXY_DIR/plugins/linkedhardcore/config.json"

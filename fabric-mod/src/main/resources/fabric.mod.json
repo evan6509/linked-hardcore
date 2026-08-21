@@ -3,7 +3,7 @@
   "id": "linkedhardcore",
   "version": "${version}",
   "name": "Linked Hardcore",
-  "description": "Paired-server hardcore: shared-life groups across two Fabric backends behind Velocity. Reports deaths to the proxy and handles group elimination.",
+  "description": "Shared-life hardcore across Fabric backends behind Velocity. Reports deaths to the proxy and coordinates linked transfers.",
   "authors": [
     "linked-hardcore"
   ],

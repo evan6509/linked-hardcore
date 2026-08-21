@@ -59,15 +59,15 @@ public final class ServerLifecycleListener {
             }
             RegisteredServer server = proxy.getServer(name).orElse(null);
             if (server != null && server.getPlayersConnected().isEmpty()) {
-                status.transition(ServerState.READY, logger);
+                status.tryTransition(ServerState.READY, logger);
             }
         }
     }
 
     private void markLive(RegisteredServer server) {
         ServerStatus status = servers.get(server.getServerInfo().getName());
-        if (status != null && status.is(ServerState.READY)) {
-            status.transition(ServerState.LIVE, logger);
+        if (status != null && !status.is(ServerState.RESETTING) && !status.is(ServerState.TRANSFERRING)) {
+            status.tryTransition(ServerState.LIVE, logger);
         }
     }
 }

@@ -57,9 +57,10 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
   4. Marks the vacated server `RESETTING`.
   5. Signals the external agent via `ResetSignaller`
      (file impl: `reset.request.json`; a webhook impl is a noted alternative).
-- **Polls readiness.** `StatusPoller` (scheduled task, default every 1s) reads
-  each backend's `status.json` and, when a `RESETTING` server reports `ready` +
-  `playerCount 0`, flips it to `READY` and resumes any pending transfer for it.
+- **Polls readiness.** `StatusPoller` reads each backend's one-second
+  `status.json` heartbeat. A backend is `UNAVAILABLE` until it reports a fresh
+  `ready` + `playerCount 0` snapshot, and becomes unavailable again when the
+  heartbeat goes stale. This prevents routing into offline or booting servers.
 - **Status command.** `/linkedhardcore status` (alias `/lh status`) shows
   per-server state and who's online.
 
@@ -74,8 +75,9 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
   event, players arriving in spectator are respawned into survival.
 - **Reliability.** `ProxyMessenger` tracks pending `PLAYER_DIED`s; un-acked
   entries trigger a warning after `ackTimeoutSeconds` (see `PROTOCOL.md`).
-- **Status reporting.** `StatusFileWriter` writes `status.json` on lifecycle
-  events. The mod never touches world/playerdata files.
+- **Status reporting.** `StatusFileWriter` atomically refreshes `status.json`
+  every second and on lifecycle events. The mod never touches world/playerdata
+  files.
 
 ### External reset watcher (Sisyphus) — outside this repo
 
@@ -84,11 +86,14 @@ Only the contract is defined here; see `docs/RESET_CONTRACT.md`.
 ## Server state machine
 
 Explicit and validated — illegal transitions throw instead of silently corrupting
-state. Mirrors the `status.json` states the mod reports.
+state. `UNAVAILABLE` and `TRANSFERRING` are proxy-only safety states; the other
+states mirror `status.json`.
 
 ```
+UNAVAILABLE --fresh ready heartbeat---> READY
 READY --player joins------------------> LIVE
-LIVE  --group transferred out---------> RESETTING
+LIVE  --transfer starts---------------> TRANSFERRING
+TRANSFERRING --all moves succeed------> RESETTING
 RESETTING --reset complete/ready------> READY
 ```
 
@@ -96,10 +101,12 @@ Transitions:
 
 | From       | To          | Trigger |
 |------------|-------------|---------|
+| UNAVAILABLE | READY      | fresh `status.json` reports `ready`, zero players |
 | READY      | LIVE        | a player joins (group member arrives) |
-| LIVE       | RESETTING   | the group was transferred out (TRANSFER_READY) |
-| LIVE       | READY       | full evacuation without elimination |
-| RESETTING  | READY       | RESET_COMPLETE or status.json `ready` |
+| LIVE       | TRANSFERRING | linked transfer begins |
+| TRANSFERRING | RESETTING | every requested connection succeeds and sources are empty |
+| TRANSFERRING | LIVE/READY | transfer failure; never reset automatically |
+| RESETTING  | READY       | fresh `status.json` heartbeat reports ready |
 
 ## The seam: plugin messaging
 

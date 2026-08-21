@@ -46,46 +46,47 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
         messenger.register();
         new PlayerDeathListener(messenger).register();
 
-        // status.json lifecycle: report ready once the world is up, live once a
-        // player joins, ready again when the server empties, and resetting when the
-        // proxy flags us via a reset request (checked on tick).
+        // A one-second heartbeat makes status.json a liveness signal as well as a
+        // lifecycle snapshot. The proxy will never route a transfer to a stale file.
+        final int[] statusHeartbeatTicks = {0};
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
-            statusWriter.write("ready", server.getPlayerCount());
-            LOGGER.info("[linkedhardcore] Server started; state=ready");
+            boolean resetPending = writeCurrentStatus(server, statusWriter);
+            if (!resetPending) {
+                messenger.sendResetComplete(server, config.serverId());
+            }
+            LOGGER.info("[linkedhardcore] Server started; status written");
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
             // Players arrive as spectator after a transfer; respawn them into play.
             transferCountdown.respawnOnJoin(handler.player);
-            statusWriter.write("live", server.getPlayerCount());
+            writeCurrentStatus(server, statusWriter);
         });
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
-            int count = server.getPlayerCount();
-            // If a reset has been requested (proxy wrote reset.request.json), the
-            // server must report "resetting", not "ready", so the proxy's poller
-            // does not prematurely flip it back to READY while a wipe is pending.
-            boolean resetPending = java.nio.file.Files.isRegularFile(ModConfig.CONFIG_DIR.resolve("reset.request.json"));
-            statusWriter.write(count == 0 ? (resetPending ? "resetting" : "ready") : "live", count);
+            writeCurrentStatus(server, statusWriter);
         });
 
         // Per-tick: warn on un-acked deaths, advance the transfer countdown, and
-        // detect an external reset request so we can report state=resetting.
+        // refresh the liveness heartbeat every second.
         ServerTickEvents.END_SERVER_TICK.register(server -> {
             messenger.checkPendingAcks();
             transferCountdown.tick(server);
-            checkResetRequest(statusWriter);
+            if (++statusHeartbeatTicks[0] >= 20) {
+                statusHeartbeatTicks[0] = 0;
+                writeCurrentStatus(server, statusWriter);
+            }
         });
 
         ServerLifecycleEvents.SERVER_STOPPING.register(server ->
             LOGGER.info("[linkedhardcore] Server stopping."));
     }
 
-    /** If the proxy (or Sisyphus) dropped a reset.request.json, report resetting. */
-    private static void checkResetRequest(StatusFileWriter writer) {
-        // Placeholder seam: the proxy writes reset.request.json into this same
-        // directory. When present, we mirror it into status.json as "resetting".
+    /** Writes the real current player count; reset requests never fabricate an empty server. */
+    private static boolean writeCurrentStatus(net.minecraft.server.MinecraftServer server, StatusFileWriter writer) {
         java.nio.file.Path request = ModConfig.CONFIG_DIR.resolve("reset.request.json");
-        if (java.nio.file.Files.isRegularFile(request)) {
-            writer.write("resetting", 0);
-        }
+        boolean resetPending = java.nio.file.Files.isRegularFile(request);
+        int playerCount = server.getPlayerCount();
+        String state = resetPending ? "resetting" : playerCount == 0 ? "ready" : "live";
+        writer.write(state, playerCount);
+        return resetPending;
     }
 }

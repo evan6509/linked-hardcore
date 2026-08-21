@@ -97,14 +97,17 @@ For **each** backend server, in its own directory:
        "a": { "serverId": "a", "statusFile": "<abs-path>/server-a/config/linkedhardcore/status.json" },
        "b": { "serverId": "b", "statusFile": "<abs-path>/server-b/config/linkedhardcore/status.json" }
      },
-     "statusPollSeconds": 1
+     "statusPollSeconds": 1,
+     "statusStaleSeconds": 5
    }
    ```
    > Add one entry per backend under `backendServers` (any number of servers).
    > The `statusFile` path tells the plugin where each server's status file lives,
    > so it can poll for `ready` and write `reset.request.json` next to it. Adjust
    > for your directory layout. `statusPollSeconds` controls how often the proxy
-   > checks server readiness (default 1).
+   > checks server readiness (default 1). `statusStaleSeconds` is the maximum
+   > permitted age of the mod's one-second status heartbeat before the backend is
+   > treated as unavailable (default 5).
 4. Restart the proxy.
 
 ### 3. Run Sisyphus (external reset agent)
@@ -197,8 +200,9 @@ still holds for external agents.
    transferred to B. The proxy marks A `RESETTING` and writes
    `config/linkedhardcore/reset.request.json` (shared volume) next to A's
    `status.json`.
-2. A's entrypoint watcher sees the file, stops the JVM cleanly, **deletes the
-   world dirs**, removes `reset.request.json`, and exits.
+2. A's entrypoint watcher waits until `status.json` confirms `resetting` with
+   zero players, then stops the JVM cleanly, **deletes the world dirs**, removes
+   `reset.request.json`, and exits.
 3. `restart: unless-stopped` restarts A's container. The entrypoint re-templates
    the configs, boots a fresh world, and the mod reports `state: "ready"`.
 4. The proxy's status poller sees `ready` + `playerCount: 0` and flips A back to

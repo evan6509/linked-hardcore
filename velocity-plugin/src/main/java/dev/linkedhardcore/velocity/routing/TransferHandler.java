@@ -11,30 +11,22 @@ import dev.linkedhardcore.velocity.net.Protocol;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
 import org.slf4j.Logger;
 
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import java.util.UUID;
-import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.CompletableFuture;
 
 /**
- * Core routing: turns a {@code PLAYER_DIED} notification into a countdown +
- * transfer of the entire linked player pool, and marks the vacated server for
- * reset. Supports any number of backend servers.
+ * Routes the one shared life pool through a safe transfer lifecycle.
  *
- * <p>All players on the backends share one life pool — there are no groups.
- * Flow:
- * <ol>
- *   <li>{@code PLAYER_DIED} from a backend → ACK.</li>
- *   <li>Pick a destination: the first server that is {@code READY} and not the
- *       source. If one exists, send {@code PREPARE_TRANSFER} (start the
- *       countdown). If none does, send {@code WAIT_FOR_SERVER} and record a
- *       pending transfer.</li>
- *   <li>The Fabric mod shows the countdown, then replies {@code TRANSFER_READY}.</li>
- *   <li>{@link #onTransferReady} transfers every player on the proxy to the
- *       chosen destination and flags the vacated server for reset.</li>
- *   <li>When a server later becomes {@code READY} (status poll or RESET_COMPLETE),
- *       {@link #onServerReady} resumes any pending transfer for it.</li>
- * </ol>
+ * <p>Only one linked-life transfer may be active at a time. A transfer is held
+ * while no destination is ready, then every occupied backend is put into the
+ * same spectator/countdown flow. The vacated worlds are reset only after every
+ * requested Velocity connection succeeds and every source backend is empty.
  */
 public final class TransferHandler {
 
@@ -44,8 +36,8 @@ public final class TransferHandler {
     private final ResetSignaller resetSignaller;
     private final Logger logger;
 
-    /** A transfer waiting for an available destination: (source server name, chosen destination name). */
-    private final AtomicReference<PendingTransfer> pending = new AtomicReference<>();
+    private final Object transferLock = new Object();
+    private PendingTransfer pending;
 
     public TransferHandler(ProxyServer proxy, PluginConfig config,
                            Map<String, ServerStatus> servers, ResetSignaller resetSignaller, Logger logger) {
@@ -56,128 +48,86 @@ public final class TransferHandler {
         this.logger = logger;
     }
 
-    /**
-     * Handles an inbound {@code PLAYER_DIED} from a backend.
-     *
-     * <ol>
-     *   <li>ACK the originating server immediately (the mod's ack-timeout must
-     *       resolve even for unexpected deaths).</li>
-     *   <li>Pick a READY destination: send {@code PREPARE_TRANSFER} if one is
-     *       available, otherwise send {@code WAIT_FOR_SERVER} and hold the
-     *       transfer pending until a server becomes ready.</li>
-     * </ol>
-     */
+    /** ACKs a death and starts one serialized transfer for the shared life pool. */
     public void onPlayerDied(ServerConnection source, UUID playerUuid) {
         String fromServerName = source.getServerInfo().getName();
         logger.info("[linkedhardcore] PLAYER_DIED from '{}': player={}", fromServerName, playerUuid);
-
-        // 1. ACK — do this first, unconditionally, so the mod's pending-ack tracker resolves.
         source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid));
 
-        // 2. Try to transfer now if a ready destination exists.
-        attemptTransfer(fromServerName);
+        synchronized (transferLock) {
+            if (!servers.containsKey(fromServerName)) {
+                logger.warn("[linkedhardcore] Ignoring death from unconfigured backend '{}'", fromServerName);
+                return;
+            }
+            if (pending != null) {
+                logger.info("[linkedhardcore] Ignoring PLAYER_DIED from '{}'; transfer already active for {}",
+                    fromServerName, pending.sourceNames);
+                return;
+            }
+
+            Set<String> sourceNames = activeBackendServers();
+            sourceNames.add(fromServerName);
+            if (!markSourcesTransferringLocked(sourceNames)) {
+                logger.warn("[linkedhardcore] Cannot start transfer from '{}'; a source is resetting", fromServerName);
+                restoreSourceStatesLocked(sourceNames);
+                return;
+            }
+
+            pending = new PendingTransfer(sourceNames);
+            attemptTransferLocked();
+        }
     }
 
     /**
-     * Handles {@code TRANSFER_READY} from a backend: the countdown finished on
-     * that server, so now move every player on the proxy to the destination and
-     * flag the vacated server for reset.
+     * Starts proxy connections after a countdown response from one participating
+     * backend. Responses from stale or unrelated countdowns are ignored.
      */
     public void onTransferReady(ServerConnection source) {
         String fromServerName = source.getServerInfo().getName();
-        PendingTransfer current = pending.getAndSet(null);
-        String destinationName = current != null ? current.destinationName() : findReadyBackendExcept(fromServerName)
-            .map(s -> s.getServerInfo().getName()).orElse(null);
+        PendingTransfer transfer;
+        String destinationName;
 
-        logger.info("[linkedhardcore] TRANSFER_READY from '{}'; destination={}", fromServerName, destinationName);
-
-        if (destinationName == null) {
-            logger.error("[linkedhardcore] No ready backend to transfer to (from '{}').", fromServerName);
-            return;
-        }
-        Optional<RegisteredServer> destination = proxy.getServer(destinationName);
-        if (destination.isEmpty()) {
-            logger.error("[linkedhardcore] Destination server '{}' is not registered.", destinationName);
-            return;
-        }
-        RegisteredServer to = destination.get();
-
-        // Transfer every player currently connected to the proxy.
-        int transferred = 0;
-        for (Player player : proxy.getAllPlayers()) {
-            String currentServer = player.getCurrentServer().map(sc -> sc.getServerInfo().getName()).orElse(null);
-            if (destinationName.equals(currentServer)) {
-                logger.info("[linkedhardcore] Player {} already on {}; skipping", player.getUsername(), destinationName);
-                continue;
+        synchronized (transferLock) {
+            if (pending == null || pending.phase != TransferPhase.COUNTDOWN
+                || !pending.sourceNames.contains(fromServerName)) {
+                logger.warn("[linkedhardcore] Ignoring stale TRANSFER_READY from '{}'", fromServerName);
+                return;
             }
-            player.createConnectionRequest(to).connect().whenComplete((result, error) -> {
-                if (error != null || result == null || !result.isSuccessful()) {
-                    logger.warn("[linkedhardcore] Failed to transfer player {} to {}: {}", player.getUsername(), destinationName, error != null ? error : result);
-                } else {
-                    logger.info("[linkedhardcore] Transferred {} to {}", player.getUsername(), destinationName);
-                }
-            });
-            transferred++;
-        }
-        logger.info("[linkedhardcore] Transfer initiated for {} player(s) from '{}' to '{}'", transferred, fromServerName, destinationName);
 
-        // The originating server is now empty (everyone transferred) -> RESETTING,
-        // and the destination is LIVE. Guarded so an unexpected transition can never
-        // abort the reset signal below.
-        ServerStatus fromStatus = servers.get(fromServerName);
-        ServerStatus toStatus = servers.get(destinationName);
-        try {
-            if (fromStatus != null) {
-                fromStatus.transition(ServerState.RESETTING, logger);
+            destinationName = pending.destinationName;
+            ServerStatus destinationStatus = destinationName == null ? null : servers.get(destinationName);
+            if (destinationStatus == null || !destinationStatus.is(ServerState.READY)) {
+                logger.warn("[linkedhardcore] Countdown destination '{}' is no longer ready; returning to wait state",
+                    destinationName);
+                pending.destinationName = null;
+                pending.phase = TransferPhase.WAITING_FOR_DESTINATION;
+                attemptTransferLocked();
+                return;
             }
-        } catch (IllegalStateException e) {
-            logger.warn("[linkedhardcore] Could not mark '{}' RESETTING ({}); continuing to signal reset.", fromServerName, e.getMessage());
-        }
-        try {
-            if (toStatus != null) {
-                toStatus.transition(ServerState.LIVE, logger);
-            }
-        } catch (IllegalStateException e) {
-            logger.warn("[linkedhardcore] Could not mark '{}' LIVE ({}); continuing to signal reset.", destinationName, e.getMessage());
+
+            pending.phase = TransferPhase.CONNECTING;
+            transfer = pending;
         }
 
-        // Signal the external agent to wipe the vacated server.
-        try {
-            resetSignaller.signalReset(fromServerName);
-        } catch (Exception e) {
-            logger.error("[linkedhardcore] Failed to signal reset for '{}': {}", fromServerName, e.toString());
-        }
+        beginConnections(transfer, destinationName);
     }
 
-    /**
-     * Handles a {@code RESET_COMPLETE} from a backend, or a status poll reporting
-     * the server ready: flip it back to READY (idempotent) and resume any pending
-     * transfer that was waiting for it.
-     *
-     * @param serverName the velocity server name that became ready
-     */
+    /** Called by the status poller when a fresh status file reports an empty ready backend. */
     public void onServerReady(String serverName) {
         ServerStatus status = servers.get(serverName);
-        if (status != null) {
-            status.transition(ServerState.READY, logger);
+        if (status != null && !status.is(ServerState.TRANSFERRING)) {
+            status.tryTransition(ServerState.READY, logger);
         }
-        // If a transfer is pending and this server can be its destination (either
-        // it was already chosen, or we were waiting for any ready server), kick it off.
-        PendingTransfer current = pending.get();
-        if (current != null && (current.destinationName() == null || serverName.equals(current.destinationName()))) {
-            logger.info("[linkedhardcore] Server '{}' ready; resuming pending transfer from '{}'",
-                serverName, current.sourceName());
-            pending.set(null);
-            attemptTransfer(current.sourceName());
+
+        synchronized (transferLock) {
+            if (pending != null && pending.phase == TransferPhase.WAITING_FOR_DESTINATION) {
+                logger.info("[linkedhardcore] Server '{}' ready; resuming transfer for {}", serverName, pending.sourceNames);
+                attemptTransferLocked();
+            }
         }
     }
 
-    /**
-     * Handles {@code RESET_COMPLETE} (logical serverId form). Delegates to
-     * {@link #onServerReady}.
-     *
-     * @param serverId the logical server id reported by the mod (e.g. {@code a} or {@code b})
-     */
+    /** Handles RESET_COMPLETE using the logical server id carried by the protocol. */
     public void onResetComplete(String serverId) {
         Optional<String> velocityName = config.velocityNameForServerId(serverId);
         if (velocityName.isEmpty()) {
@@ -187,36 +137,155 @@ public final class TransferHandler {
         onServerReady(velocityName.get());
     }
 
-    /**
-     * Tries to start a transfer from {@code sourceName}: if a READY destination
-     * exists, send PREPARE_TRANSFER; otherwise tell the source to wait.
-     */
-    private void attemptTransfer(String sourceName) {
-        Optional<RegisteredServer> ready = findReadyBackendExcept(sourceName);
-        if (ready.isPresent()) {
-            String destinationName = ready.get().getServerInfo().getName();
-            pending.set(new PendingTransfer(sourceName, destinationName));
-            Optional<RegisteredServer> source = proxy.getServer(sourceName);
-            if (source.isPresent()) {
-                source.get().sendPluginMessage(Protocol.CHANNEL, Protocol.encodePrepareTransfer());
-                logger.info("[linkedhardcore] PREPARE_TRANSFER sent to '{}' (dest '{}')", sourceName, destinationName);
+    /** Chooses a ready destination and sends a message to every occupied source backend. */
+    private void attemptTransferLocked() {
+        if (pending == null) {
+            return;
+        }
+
+        Set<String> newlyActive = activeBackendServers();
+        newlyActive.removeAll(pending.sourceNames);
+        if (!newlyActive.isEmpty()) {
+            if (!markSourcesTransferringLocked(newlyActive)) {
+                logger.error("[linkedhardcore] Could not include active backends in the linked transfer: {}", newlyActive);
             } else {
-                logger.error("[linkedhardcore] Source server '{}' not registered; cannot start transfer", sourceName);
+                pending.sourceNames.addAll(newlyActive);
             }
+        }
+
+        Optional<RegisteredServer> ready = findReadyBackendExcept(pending.sourceNames);
+        if (ready.isPresent()) {
+            pending.destinationName = ready.get().getServerInfo().getName();
+            pending.phase = TransferPhase.COUNTDOWN;
+            sendToSourcesLocked(Protocol.encodePrepareTransfer(), "PREPARE_TRANSFER");
         } else {
-            pending.set(new PendingTransfer(sourceName, null));
-            Optional<RegisteredServer> source = proxy.getServer(sourceName);
-            if (source.isPresent()) {
-                source.get().sendPluginMessage(Protocol.CHANNEL, Protocol.encodeWaitForServer());
-                logger.info("[linkedhardcore] No ready destination; WAIT_FOR_SERVER sent to '{}'", sourceName);
+            pending.destinationName = null;
+            pending.phase = TransferPhase.WAITING_FOR_DESTINATION;
+            sendToSourcesLocked(Protocol.encodeWaitForServer(), "WAIT_FOR_SERVER");
+        }
+    }
+
+    private void beginConnections(PendingTransfer transfer, String destinationName) {
+        Optional<RegisteredServer> destination = proxy.getServer(destinationName);
+        if (destination.isEmpty()) {
+            completeTransfer(transfer, destinationName, false);
+            return;
+        }
+
+        List<CompletableFuture<Boolean>> outcomes = new ArrayList<>();
+        for (Player player : proxy.getAllPlayers()) {
+            String currentServer = player.getCurrentServer().map(connection -> connection.getServerInfo().getName()).orElse(null);
+            if (destinationName.equals(currentServer)) {
+                continue;
+            }
+            outcomes.add(player.createConnectionRequest(destination.get()).connect().handle((result, error) -> {
+                boolean successful = error == null && result != null && result.isSuccessful();
+                if (successful) {
+                    logger.info("[linkedhardcore] Transferred {} to {}", player.getUsername(), destinationName);
+                } else {
+                    logger.warn("[linkedhardcore] Failed to transfer {} to {}: {}", player.getUsername(), destinationName,
+                        error != null ? error : result);
+                }
+                return successful;
+            }));
+        }
+
+        CompletableFuture.allOf(outcomes.toArray(CompletableFuture[]::new)).whenComplete((ignored, error) -> {
+            boolean allSuccessful = error == null && outcomes.stream().allMatch(outcome -> Boolean.TRUE.equals(outcome.getNow(false)));
+            completeTransfer(transfer, destinationName, allSuccessful);
+        });
+    }
+
+    private void completeTransfer(PendingTransfer transfer, String destinationName, boolean connectionsSucceeded) {
+        Set<String> resetTargets = Set.of();
+        synchronized (transferLock) {
+            if (pending != transfer || pending.phase != TransferPhase.CONNECTING) {
+                return;
+            }
+
+            boolean sourcesEmpty = transfer.sourceNames.stream().allMatch(this::isServerEmpty);
+            if (!connectionsSucceeded || !sourcesEmpty) {
+                logger.error("[linkedhardcore] Transfer to '{}' did not complete safely (connectionsSucceeded={}, sourcesEmpty={}). "
+                    + "No reset will be signalled; operator intervention may be required.",
+                    destinationName, connectionsSucceeded, sourcesEmpty);
+                restoreSourceStatesLocked(transfer.sourceNames);
+                pending = null;
+                return;
+            }
+
+            LinkedHashSet<String> targets = new LinkedHashSet<>();
+            for (String sourceName : transfer.sourceNames) {
+                ServerStatus sourceStatus = servers.get(sourceName);
+                if (sourceStatus != null) {
+                    sourceStatus.tryTransition(ServerState.RESETTING, logger);
+                    if (sourceStatus.is(ServerState.RESETTING)) {
+                        targets.add(sourceName);
+                    }
+                }
+            }
+            ServerStatus destinationStatus = servers.get(destinationName);
+            if (destinationStatus != null) {
+                destinationStatus.tryTransition(ServerState.LIVE, logger);
+            }
+            pending = null;
+            resetTargets = targets;
+        }
+
+        for (String sourceName : resetTargets) {
+            PluginConfig.BackendServer backend = config.backendServers().get(sourceName);
+            if (backend == null) {
+                logger.error("[linkedhardcore] No backend config for reset target '{}'", sourceName);
+                continue;
+            }
+            try {
+                resetSignaller.signalReset(backend.serverId());
+            } catch (Exception e) {
+                logger.error("[linkedhardcore] Failed to signal reset for '{}': {}", sourceName, e.toString());
             }
         }
     }
 
-    /** First registered server (in config order) that is READY and not {@code excludeName}. */
-    private Optional<RegisteredServer> findReadyBackendExcept(String excludeName) {
+    private Set<String> activeBackendServers() {
+        LinkedHashSet<String> active = new LinkedHashSet<>();
         for (String name : config.backendServers().keySet()) {
-            if (name.equals(excludeName)) {
+            proxy.getServer(name).filter(server -> !server.getPlayersConnected().isEmpty()).ifPresent(server -> active.add(name));
+        }
+        return active;
+    }
+
+    private boolean markSourcesTransferringLocked(Set<String> sourceNames) {
+        for (String sourceName : sourceNames) {
+            ServerStatus status = servers.get(sourceName);
+            if (status == null || status.is(ServerState.RESETTING)) {
+                return false;
+            }
+            if (!status.is(ServerState.TRANSFERRING)) {
+                status.tryTransition(ServerState.LIVE, logger);
+                if (!status.is(ServerState.LIVE) || !status.tryTransition(ServerState.TRANSFERRING, logger)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    }
+
+    private void restoreSourceStatesLocked(Set<String> sourceNames) {
+        for (String sourceName : sourceNames) {
+            ServerStatus status = servers.get(sourceName);
+            if (status != null && status.is(ServerState.TRANSFERRING)) {
+                status.tryTransition(isServerEmpty(sourceName) ? ServerState.READY : ServerState.LIVE, logger);
+            }
+        }
+    }
+
+    private boolean isServerEmpty(String serverName) {
+        return proxy.getServer(serverName).map(server -> server.getPlayersConnected().isEmpty()).orElse(true);
+    }
+
+    /** First configured backend that is READY and does not currently host linked players. */
+    private Optional<RegisteredServer> findReadyBackendExcept(Set<String> excludedNames) {
+        for (String name : config.backendServers().keySet()) {
+            if (excludedNames.contains(name)) {
                 continue;
             }
             ServerStatus status = servers.get(name);
@@ -230,7 +299,37 @@ public final class TransferHandler {
         return Optional.empty();
     }
 
-    /** A transfer awaiting its destination. destinationName may be null while still choosing. */
-    private record PendingTransfer(String sourceName, String destinationName) {
+    private void sendToSourcesLocked(byte[] frame, String messageName) {
+        int sent = 0;
+        for (String sourceName : pending.sourceNames) {
+            Optional<RegisteredServer> source = proxy.getServer(sourceName);
+            if (source.isPresent() && !source.get().getPlayersConnected().isEmpty()) {
+                source.get().sendPluginMessage(Protocol.CHANNEL, frame);
+                sent++;
+            }
+        }
+        if (sent == 0) {
+            logger.warn("[linkedhardcore] {} could not be delivered: no source backend has a player connection", messageName);
+        } else {
+            logger.info("[linkedhardcore] {} sent to {} source backend(s); destination={}",
+                messageName, sent, pending.destinationName);
+        }
+    }
+
+    private enum TransferPhase {
+        WAITING_FOR_DESTINATION,
+        COUNTDOWN,
+        CONNECTING
+    }
+
+    private static final class PendingTransfer {
+        private final LinkedHashSet<String> sourceNames;
+        private String destinationName;
+        private TransferPhase phase;
+
+        private PendingTransfer(Set<String> sourceNames) {
+            this.sourceNames = new LinkedHashSet<>(sourceNames);
+            this.phase = TransferPhase.WAITING_FOR_DESTINATION;
+        }
     }
 }

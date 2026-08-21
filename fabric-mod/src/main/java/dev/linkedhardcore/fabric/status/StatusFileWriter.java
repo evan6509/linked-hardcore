@@ -10,6 +10,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.time.Instant;
 
 /**
@@ -48,7 +50,13 @@ public final class StatusFileWriter {
         Status body = new Status(1, config.serverId(), state, playerCount, Instant.now().toString());
         try {
             Files.createDirectories(statusFile.getParent());
-            Files.writeString(statusFile, GSON.toJson(body), StandardCharsets.UTF_8);
+            Path temporary = statusFile.resolveSibling(statusFile.getFileName() + ".tmp");
+            Files.writeString(temporary, GSON.toJson(body), StandardCharsets.UTF_8);
+            try {
+                Files.move(temporary, statusFile, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, statusFile, StandardCopyOption.REPLACE_EXISTING);
+            }
             LOGGER.debug("[linkedhardcore] status.json -> {}", state);
         } catch (IOException e) {
             LOGGER.warn("[linkedhardcore] Failed to write {}: {}", statusFile, e.toString());

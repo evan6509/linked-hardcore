@@ -12,6 +12,7 @@ import org.slf4j.Logger;
 
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.FileTime;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
@@ -19,9 +20,10 @@ import java.util.concurrent.TimeUnit;
  * Polls each backend's {@code status.json} (written by the Fabric mod) to learn
  * when a server has finished resetting and is ready again.
  *
- * <p>The file contract is documented in {@code docs/RESET_CONTRACT.md}. When a
- * server whose proxy state is {@code RESETTING} reports {@code state: "ready"}
- * with {@code playerCount: 0}, we flip it to {@code READY} and notify
+ * <p>The file contract is documented in {@code docs/RESET_CONTRACT.md}. A
+ * backend is routable only while its status file is fresh and reports
+ * {@code state: "ready"} with {@code playerCount: 0}. Stale or unreadable files
+ * make the backend {@code UNAVAILABLE}; a fresh ready report notifies
  * {@link TransferHandler} so any pending transfer can resume.
  *
  * <p>Poll interval is configurable via {@code statusPollSeconds} (default 1s).
@@ -50,7 +52,7 @@ public final class StatusPoller {
 
     /** Starts the periodic poll. Call once during proxy init. */
     public void start() {
-        Scheduler.TaskBuilder builder = proxy.getScheduler().buildTask(plugin, this::poll)
+        Scheduler.TaskBuilder builder = proxy.getScheduler().buildTask(plugin, this::pollOnce)
             .delay(1, TimeUnit.SECONDS)
             .repeat(config.statusPollSeconds(), TimeUnit.SECONDS);
         task = builder.schedule();
@@ -65,7 +67,8 @@ public final class StatusPoller {
         }
     }
 
-    private void poll() {
+    /** Runs one poll cycle. Package-visible for focused status-file tests. */
+    void pollOnce() {
         for (Map.Entry<String, PluginConfig.BackendServer> entry : config.backendServers().entrySet()) {
             String name = entry.getKey();
             PluginConfig.BackendServer backend = entry.getValue();
@@ -73,14 +76,32 @@ public final class StatusPoller {
             if (status == null) {
                 continue;
             }
-            StatusFile file = readStatus(Path.of(backend.statusFile()));
-            if (file == null) {
+            Path path = Path.of(backend.statusFile());
+            StatusFile file = readStatus(path);
+            if (file == null || isStale(path)) {
+                status.tryTransition(ServerState.UNAVAILABLE, logger);
                 continue;
             }
-            if ("ready".equals(file.state) && file.playerCount == 0 && status.is(ServerState.RESETTING)) {
-                logger.info("[linkedhardcore] Status poll: server '{}' is ready again", name);
+            if ("ready".equals(file.state) && file.playerCount == 0) {
                 transferHandler.onServerReady(name);
+            } else if ("live".equals(file.state) || file.playerCount > 0) {
+                if (!status.is(ServerState.TRANSFERRING) && !status.is(ServerState.RESETTING)) {
+                    status.tryTransition(ServerState.LIVE, logger);
+                }
+            } else if ("resetting".equals(file.state) && !status.is(ServerState.TRANSFERRING)) {
+                status.tryTransition(ServerState.RESETTING, logger);
+            } else {
+                status.tryTransition(ServerState.UNAVAILABLE, logger);
             }
+        }
+    }
+
+    private boolean isStale(Path path) {
+        try {
+            FileTime modified = Files.getLastModifiedTime(path);
+            return modified.toMillis() < System.currentTimeMillis() - config.statusStaleSeconds() * 1000L;
+        } catch (Exception e) {
+            return true;
         }
     }
 

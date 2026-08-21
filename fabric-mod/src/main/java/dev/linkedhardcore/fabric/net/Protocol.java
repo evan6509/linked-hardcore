@@ -112,14 +112,24 @@ public final class Protocol {
 
     /** Decodes a raw payload frame received from the proxy. */
     public static Inbound decode(byte[] data) {
+        if (data == null || data.length == 0) {
+            return new Inbound((byte) 0, null);
+        }
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
-        byte opcode = buf.readByte();
-        return switch (opcode) {
-            case OP_PREPARE_TRANSFER -> new Inbound(opcode, null);
-            case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null);
-            case OP_ACK -> new Inbound(opcode, buf.readUUID());
-            default -> new Inbound(opcode, null);
-        };
+        try {
+            byte opcode = buf.readByte();
+            return switch (opcode) {
+                case OP_PREPARE_TRANSFER -> new Inbound(opcode, null);
+                case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null);
+                case OP_ACK -> buf.readableBytes() == 16
+                    ? new Inbound(opcode, buf.readUUID()) : new Inbound((byte) 0, null);
+                default -> new Inbound(opcode, null);
+            };
+        } catch (IndexOutOfBoundsException e) {
+            return new Inbound((byte) 0, null);
+        } finally {
+            buf.release();
+        }
     }
 
     private static byte[] drain(FriendlyByteBuf buf) {

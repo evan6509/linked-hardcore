@@ -17,9 +17,9 @@ All files live in each backend server's **config directory**:
 
 ## `status.json`
 
-Written by the Fabric mod (see `StatusFileWriter`). Written on: server start
-(`ready`), player join (`live`), player leave (`live` or `ready` when last player
-leaves), and when a `reset.request.json` is detected (`resetting`).
+Written atomically by the Fabric mod (see `StatusFileWriter`) on server lifecycle
+events and refreshed every second as a liveness heartbeat. Its player count is
+always the actual online count, including while a reset request is pending.
 
 ```json
 {
@@ -64,9 +64,9 @@ Written by the Velocity plugin when it flags a server for reset (see
 
 ## Sisyphus contract
 
-1. **Poll** `status.json` (or watch for `reset.request.json`) for
-   `state: "resetting"` AND `playerCount: 0` (or the presence of a fresh
-   `reset.request.json`).
+1. **Poll** `status.json` for `state: "resetting"` AND `playerCount: 0` before
+   acting on a `reset.request.json`. The request alone is not proof that all
+   connections have completed.
 2. **Stop** the server process.
 3. **Delete** the world and player data:
    - `world/`

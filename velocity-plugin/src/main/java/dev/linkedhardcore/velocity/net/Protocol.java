@@ -150,6 +150,9 @@ public final class Protocol {
 
     private static String readString(DataInputStream in) throws IOException {
         int length = readVarInt(in);
+        if (length < 0 || length > in.available()) {
+            throw new IOException("Invalid string length: " + length);
+        }
         byte[] bytes = new byte[length];
         in.readFully(bytes);
         return new String(bytes, StandardCharsets.UTF_8);

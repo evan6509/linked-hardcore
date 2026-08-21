@@ -54,8 +54,10 @@ public final class StatusCommand implements SimpleCommand {
     private static NamedTextColor stateColor(String state) {
         return switch (state) {
             case "live" -> NamedTextColor.GREEN;
+            case "transferring" -> NamedTextColor.YELLOW;
             case "ready" -> NamedTextColor.DARK_GREEN;
             case "resetting" -> NamedTextColor.RED;
+            case "unavailable" -> NamedTextColor.DARK_GRAY;
             default -> NamedTextColor.WHITE;
         };
     }
