@@ -1,6 +1,7 @@
 package dev.linkedhardcore.fabric.net;
 
 import dev.linkedhardcore.fabric.config.ModConfig;
+import dev.linkedhardcore.fabric.death.DeathCounterDisplay;
 import dev.linkedhardcore.fabric.death.TransferCountdown;
 import dev.linkedhardcore.fabric.death.TransferReadyNotifier;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
@@ -145,6 +146,11 @@ public final class ProxyMessenger implements TransferReadyNotifier {
                 long rtt = System.currentTimeMillis() - sentAt;
                 LOGGER.info("[linkedhardcore] ACK received for {} (round-trip {}ms)", msg.playerUuid(), rtt);
             }
+            return;
+        }
+        if (msg.isDeathCounters()) {
+            DeathCounterDisplay.apply(server, msg.deathCounters());
+            LOGGER.debug("[linkedhardcore] Updated death counter display with {} record(s)", msg.deathCounters().size());
             return;
         }
         if (msg.isWaitForServer()) {

@@ -24,7 +24,7 @@ proxy does not fire `PluginMessageEvent` for it.
 - Direction is defined by Minecraft's custom-payload semantics:
   - **Mod → proxy** (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`): clientbound
     custom payload (registered in `PayloadTypeRegistry.clientboundPlay()`).
-  - **Proxy → mod** (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`, `ACK`): serverbound custom
+  - **Proxy → mod** (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`, `ACK`, `DEATH_COUNTERS`): serverbound custom
     payload (registered in `PayloadTypeRegistry.serverboundPlay()`).
 - The proxy intercepts these at `PluginMessageEvent`; `getData()` returns the
   raw frame bytes exactly as described below. On the Fabric side the payload is a
@@ -59,12 +59,12 @@ byte[16]  playerUuid (the player who died)
 
 Proxy behaviour (`TransferHandler#onPlayerDied`):
 1. Replies `ACK` on the same connection (unconditionally).
-2. Picks a destination: the first server that is `READY` and not the source.
-   - If one exists, sends `PREPARE_TRANSFER`.
-   - If none does, sends `WAIT_FOR_SERVER` and records a pending transfer.
-3. On `TRANSFER_READY` (sent after the mod's on-screen countdown), transfers every
-   player on the proxy to the chosen destination.
-4. Flags the vacated server for reset.
+2. Records the proxy-authoritative death total and broadcasts `DEATH_COUNTERS`.
+3. Includes every occupied backend in one transfer; if no empty `READY` backend exists,
+   sends `WAIT_FOR_SERVER` and holds the transfer pending.
+4. On `TRANSFER_READY` (sent after the countdown), transfers every player to the chosen
+   destination, waits for every connection to succeed, and verifies every source is empty.
+5. Only then flags every vacated source for reset.
 
 ### `PREPARE_TRANSFER` — opcode `0x02` (proxy → mod)
 
@@ -115,8 +115,7 @@ byte[1]   opcode = 0x05
 ```
 
 Proxy behaviour (`TransferHandler#onTransferReady`): transfers every player on the
-proxy to the chosen destination, marks the sender `RESETTING` and the destination
-`LIVE`, and flags the vacated server for reset.
+proxy to the chosen destination, then resets only the sources that are confirmed empty.
 
 ### `WAIT_FOR_SERVER` — opcode `0x06` (proxy → mod)
 
@@ -126,6 +125,22 @@ becomes ready (the proxy then sends `PREPARE_TRANSFER`).
 
 ```
 byte[1]   opcode = 0x06
+```
+
+### `DEATH_COUNTERS` — opcode `0x07` (proxy → mod)
+
+Broadcast after an accepted death and sent when a player joins a backend. The proxy
+persists these totals outside resettable world directories; the Fabric mod renders
+the snapshot in the sidebar.
+
+```
+byte[1]   opcode = 0x07
+varint    counterCount (0–10,000)
+repeat counterCount times:
+  byte[16] playerUuid
+  varint   playerName UTF-8 length
+  byte[]   playerName UTF-8 bytes
+  varint   deaths
 ```
 
 ## Reliability / failure detection

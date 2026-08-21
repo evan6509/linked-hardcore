@@ -6,6 +6,8 @@ import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
 import net.minecraft.resources.Identifier;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 
 /**
@@ -63,6 +65,7 @@ public final class Protocol {
     public static final byte OP_ACK = 0x04;
     public static final byte OP_TRANSFER_READY = 0x05;
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
+    public static final byte OP_DEATH_COUNTERS = 0x07;
 
     private Protocol() {
     }
@@ -96,7 +99,11 @@ public final class Protocol {
     // ---- Decoders (proxy -> mod) ---------------------------------------------
 
     /** Result of decoding an inbound proxy message. */
-    public record Inbound(byte opcode, UUID playerUuid) {
+    /** A proxy-authoritative death total for one player. */
+    public record DeathCounter(UUID playerUuid, String playerName, int deaths) {
+    }
+
+    public record Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters) {
         public boolean isPrepareTransfer() {
             return opcode == OP_PREPARE_TRANSFER;
         }
@@ -108,25 +115,40 @@ public final class Protocol {
         public boolean isAck() {
             return opcode == OP_ACK;
         }
+
+        public boolean isDeathCounters() {
+            return opcode == OP_DEATH_COUNTERS;
+        }
     }
 
     /** Decodes a raw payload frame received from the proxy. */
     public static Inbound decode(byte[] data) {
         if (data == null || data.length == 0) {
-            return new Inbound((byte) 0, null);
+            return new Inbound((byte) 0, null, List.of());
         }
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
         try {
             byte opcode = buf.readByte();
             return switch (opcode) {
-                case OP_PREPARE_TRANSFER -> new Inbound(opcode, null);
-                case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null);
+                case OP_PREPARE_TRANSFER -> new Inbound(opcode, null, List.of());
+                case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null, List.of());
                 case OP_ACK -> buf.readableBytes() == 16
-                    ? new Inbound(opcode, buf.readUUID()) : new Inbound((byte) 0, null);
-                default -> new Inbound(opcode, null);
+                    ? new Inbound(opcode, buf.readUUID(), List.of()) : new Inbound((byte) 0, null, List.of());
+                case OP_DEATH_COUNTERS -> {
+                    int count = buf.readVarInt();
+                    if (count < 0 || count > 10_000) {
+                        yield new Inbound((byte) 0, null, List.of());
+                    }
+                    List<DeathCounter> counters = new ArrayList<>(count);
+                    for (int i = 0; i < count; i++) {
+                        counters.add(new DeathCounter(buf.readUUID(), buf.readUtf(32_767), buf.readVarInt()));
+                    }
+                    yield new Inbound(opcode, null, List.copyOf(counters));
+                }
+                default -> new Inbound(opcode, null, List.of());
             };
-        } catch (IndexOutOfBoundsException e) {
-            return new Inbound((byte) 0, null);
+        } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
+            return new Inbound((byte) 0, null, List.of());
         } finally {
             buf.release();
         }

@@ -10,6 +10,8 @@ import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
 import dev.linkedhardcore.velocity.command.StatusCommand;
 import dev.linkedhardcore.velocity.config.PluginConfig;
+import dev.linkedhardcore.velocity.death.DeathCounterState;
+import dev.linkedhardcore.velocity.death.DeathCounterStore;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import dev.linkedhardcore.velocity.net.Protocol;
@@ -49,6 +51,8 @@ public final class LinkedHardcorePlugin {
     private Map<String, ServerStatus> servers;
     private TransferHandler transferHandler;
     private StatusPoller statusPoller;
+    private DeathCounterStore deathCounterStore;
+    private DeathCounterState deathCounters;
 
     @Inject
     public LinkedHardcorePlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -78,11 +82,16 @@ public final class LinkedHardcorePlugin {
             serverStatuses.put(name, new ServerStatus(name, ServerState.UNAVAILABLE)));
         this.servers = serverStatuses;
 
+        this.deathCounters = new DeathCounterState();
+        this.deathCounterStore = new DeathCounterStore(dataDirectory.resolve("death-counters.json"), logger);
+        deathCounterStore.loadInto(deathCounters);
+
         ResetSignaller resetSignaller = new FileResetSignaller(config, logger);
-        this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger);
+        this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger,
+            deathCounters, deathCounterStore::save);
 
         proxy.getEventManager().register(this, new ProxyMessageListener(transferHandler, logger));
-        proxy.getEventManager().register(this, new ServerLifecycleListener(proxy, config, servers, logger));
+        proxy.getEventManager().register(this, new ServerLifecycleListener(proxy, config, servers, logger, deathCounters));
 
         registerCommand(config);
 
@@ -98,7 +107,7 @@ public final class LinkedHardcorePlugin {
             .aliases("lh")
             .plugin(this)
             .build();
-        proxy.getCommandManager().register(meta, new StatusCommand(proxy, config, servers));
+        proxy.getCommandManager().register(meta, new StatusCommand(proxy, config, servers, deathCounters));
     }
 
     @Subscribe

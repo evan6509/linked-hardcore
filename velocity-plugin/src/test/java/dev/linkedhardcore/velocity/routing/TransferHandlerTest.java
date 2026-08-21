@@ -122,7 +122,9 @@ class TransferHandlerTest {
         handler.onPlayerDied(source, UUID.randomUUID());
         handler.onPlayerDied(source, UUID.randomUUID());
 
-        verify(alpha, org.mockito.Mockito.times(1)).sendPluginMessage(any(), any(byte[].class));
+        // One death-counter snapshot and one PREPARE_TRANSFER frame; the duplicate
+        // death must not trigger either frame again.
+        verify(alpha, org.mockito.Mockito.times(2)).sendPluginMessage(any(), any(byte[].class));
         assertEquals(ServerState.TRANSFERRING, statuses.get("alpha").state());
         assertTrue(statuses.get("beta").is(ServerState.READY));
     }
@@ -133,8 +135,9 @@ class TransferHandlerTest {
 
         handler.onPlayerDied(source, UUID.randomUUID());
 
-        verify(alpha).sendPluginMessage(any(), any(byte[].class));
-        verify(beta).sendPluginMessage(any(), any(byte[].class));
+        // Each occupied source receives a snapshot plus PREPARE_TRANSFER.
+        verify(alpha, org.mockito.Mockito.times(2)).sendPluginMessage(any(), any(byte[].class));
+        verify(beta, org.mockito.Mockito.times(2)).sendPluginMessage(any(), any(byte[].class));
         assertEquals(ServerState.TRANSFERRING, statuses.get("alpha").state());
         assertEquals(ServerState.TRANSFERRING, statuses.get("beta").state());
         assertEquals(ServerState.READY, statuses.get("gamma").state());

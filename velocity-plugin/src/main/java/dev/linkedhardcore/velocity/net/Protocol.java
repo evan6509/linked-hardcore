@@ -9,6 +9,7 @@ import java.io.ByteArrayInputStream;
 import java.io.DataInputStream;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
 
@@ -68,8 +69,13 @@ public final class Protocol {
     public static final byte OP_ACK = 0x04;
     public static final byte OP_TRANSFER_READY = 0x05;
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
+    public static final byte OP_DEATH_COUNTERS = 0x07;
 
     private Protocol() {
+    }
+
+    /** A proxy-authoritative death total for one player. */
+    public record DeathCounter(UUID playerUuid, String playerName, int deaths) {
     }
 
     /** A decoded inbound message from a backend server. */
@@ -128,6 +134,25 @@ public final class Protocol {
         ByteArrayDataOutput out = ByteStreams.newDataOutput();
         out.writeByte(OP_ACK);
         writeUuid(out, playerUuid);
+        return out.toByteArray();
+    }
+
+    /** Encodes the complete proxy-authoritative death-counter snapshot. */
+    public static byte[] encodeDeathCounters(List<DeathCounter> counters) {
+        if (counters == null || counters.size() > 10_000) {
+            throw new IllegalArgumentException("Invalid death-counter snapshot");
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(OP_DEATH_COUNTERS);
+        writeVarInt(out, counters.size());
+        for (DeathCounter counter : counters) {
+            if (counter == null || counter.playerUuid() == null || counter.playerName() == null || counter.deaths() < 0) {
+                throw new IllegalArgumentException("Invalid death counter");
+            }
+            writeUuid(out, counter.playerUuid());
+            writeString(out, counter.playerName());
+            writeVarInt(out, counter.deaths());
+        }
         return out.toByteArray();
     }
 

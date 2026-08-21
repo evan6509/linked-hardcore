@@ -6,6 +6,8 @@ import com.velocitypowered.api.event.player.ServerConnectedEvent;
 import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import dev.linkedhardcore.velocity.config.PluginConfig;
+import dev.linkedhardcore.velocity.death.DeathCounterBroadcaster;
+import dev.linkedhardcore.velocity.death.DeathCounterState;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import org.slf4j.Logger;
@@ -33,18 +35,21 @@ public final class ServerLifecycleListener {
     private final PluginConfig config;
     private final Map<String, ServerStatus> servers;
     private final Logger logger;
+    private final DeathCounterState deathCounters;
 
     public ServerLifecycleListener(ProxyServer proxy, PluginConfig config,
-                                   Map<String, ServerStatus> servers, Logger logger) {
+                                   Map<String, ServerStatus> servers, Logger logger, DeathCounterState deathCounters) {
         this.proxy = proxy;
         this.config = config;
         this.servers = servers;
         this.logger = logger;
+        this.deathCounters = deathCounters;
     }
 
     @Subscribe
     public void onServerConnected(ServerConnectedEvent event) {
         markLive(event.getServer());
+        DeathCounterBroadcaster.send(event.getServer(), deathCounters);
     }
 
     @Subscribe

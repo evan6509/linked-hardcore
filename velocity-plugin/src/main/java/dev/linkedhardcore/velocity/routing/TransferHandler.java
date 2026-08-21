@@ -5,6 +5,8 @@ import com.velocitypowered.api.proxy.ProxyServer;
 import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import dev.linkedhardcore.velocity.config.PluginConfig;
+import dev.linkedhardcore.velocity.death.DeathCounterBroadcaster;
+import dev.linkedhardcore.velocity.death.DeathCounterState;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import dev.linkedhardcore.velocity.net.Protocol;
@@ -19,6 +21,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
 
 /**
  * Routes the one shared life pool through a safe transfer lifecycle.
@@ -35,17 +38,27 @@ public final class TransferHandler {
     private final Map<String, ServerStatus> servers;
     private final ResetSignaller resetSignaller;
     private final Logger logger;
+    private final DeathCounterState deathCounters;
+    private final Consumer<DeathCounterState> persistDeathCounters;
 
     private final Object transferLock = new Object();
     private PendingTransfer pending;
 
     public TransferHandler(ProxyServer proxy, PluginConfig config,
                            Map<String, ServerStatus> servers, ResetSignaller resetSignaller, Logger logger) {
+        this(proxy, config, servers, resetSignaller, logger, new DeathCounterState(), ignored -> { });
+    }
+
+    public TransferHandler(ProxyServer proxy, PluginConfig config,
+                           Map<String, ServerStatus> servers, ResetSignaller resetSignaller, Logger logger,
+                           DeathCounterState deathCounters, Consumer<DeathCounterState> persistDeathCounters) {
         this.proxy = proxy;
         this.config = config;
         this.servers = servers;
         this.resetSignaller = resetSignaller;
         this.logger = logger;
+        this.deathCounters = deathCounters;
+        this.persistDeathCounters = persistDeathCounters;
     }
 
     /** ACKs a death and starts one serialized transfer for the shared life pool. */
@@ -54,6 +67,7 @@ public final class TransferHandler {
         logger.info("[linkedhardcore] PLAYER_DIED from '{}': player={}", fromServerName, playerUuid);
         source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid));
 
+        boolean deathRecorded = false;
         synchronized (transferLock) {
             if (!servers.containsKey(fromServerName)) {
                 logger.warn("[linkedhardcore] Ignoring death from unconfigured backend '{}'", fromServerName);
@@ -74,7 +88,16 @@ public final class TransferHandler {
             }
 
             pending = new PendingTransfer(sourceNames);
+            Player player = source.getPlayer();
+            String playerName = player == null ? playerUuid.toString() : player.getUsername();
+            deathCounters.recordDeath(playerUuid, playerName);
+            deathRecorded = true;
             attemptTransferLocked();
+        }
+
+        if (deathRecorded) {
+            persistDeathCounters.accept(deathCounters);
+            broadcastCounters();
         }
     }
 
@@ -280,6 +303,12 @@ public final class TransferHandler {
 
     private boolean isServerEmpty(String serverName) {
         return proxy.getServer(serverName).map(server -> server.getPlayersConnected().isEmpty()).orElse(true);
+    }
+
+    private void broadcastCounters() {
+        for (String name : config.backendServers().keySet()) {
+            proxy.getServer(name).ifPresent(server -> DeathCounterBroadcaster.send(server, deathCounters));
+        }
     }
 
     /** First configured backend that is READY and does not currently host linked players. */

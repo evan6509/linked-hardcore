@@ -3,6 +3,8 @@ package dev.linkedhardcore.fabric.net;
 import org.junit.jupiter.api.Test;
 
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -43,5 +45,25 @@ class ProtocolTest {
     void rejectsMalformedFramesWithoutThrowing() {
         assertFalse(Protocol.decode(new byte[0]).isAck());
         assertFalse(Protocol.decode(new byte[] {Protocol.OP_ACK}).isAck());
+    }
+
+    @Test
+    void decodesProxyDeathCounterSnapshots() {
+        UUID player = UUID.fromString("12345678-1234-5678-9abc-def012345678");
+        byte[] name = "player-one".getBytes(StandardCharsets.UTF_8);
+        byte[] frame = ByteBuffer.allocate(1 + 1 + 16 + 1 + name.length + 1)
+            .put(Protocol.OP_DEATH_COUNTERS)
+            .put((byte) 1)
+            .putLong(player.getMostSignificantBits())
+            .putLong(player.getLeastSignificantBits())
+            .put((byte) name.length)
+            .put(name)
+            .put((byte) 3)
+            .array();
+
+        Protocol.Inbound inbound = Protocol.decode(frame);
+
+        assertTrue(inbound.isDeathCounters());
+        assertEquals(List.of(new Protocol.DeathCounter(player, "player-one", 3)), inbound.deathCounters());
     }
 }

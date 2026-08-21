@@ -57,6 +57,9 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
   4. Marks the vacated server `RESETTING`.
   5. Signals the external agent via `ResetSignaller`
      (file impl: `reset.request.json`; a webhook impl is a noted alternative).
+- **Death counters.** The proxy persists the authoritative per-player totals in
+  `death-counters.json`, broadcasts snapshots to backends, and the Fabric mod
+  renders them in a sidebar. World resets do not erase the totals.
 - **Polls readiness.** `StatusPoller` reads each backend's one-second
   `status.json` heartbeat. A backend is `UNAVAILABLE` until it reports a fresh
   `ready` + `playerCount 0` snapshot, and becomes unavailable again when the
@@ -68,7 +71,7 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
 
 - **Death hook.** `PlayerDeathListener` subscribes
   `ServerLivingEntityEvents.AFTER_DEATH` (post-death, cannot be cancelled) and
-  sends `PLAYER_DIED` for any player death.
+  sends `PLAYER_DIED` for the player entity that actually died.
 - **Countdown + spectator.** `TransferCountdown` handles `PREPARE_TRANSFER`: every
   online player is set to spectator and sees an on-screen action-bar countdown,
   then the mod sends `TRANSFER_READY` so the proxy moves everyone. On the JOIN
