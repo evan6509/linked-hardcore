@@ -70,6 +70,28 @@ public final class ServerStatus {
         };
     }
 
+    /**
+     * Marks a backend for reset after all player transfer futures complete.
+     * A disconnect event may have changed LIVE to READY during that async window,
+     * so both states are accepted here.
+     */
+    public boolean markResettingAfterTransfer(Logger logger) {
+        while (true) {
+            ServerState current = state.get();
+            if (current == ServerState.RESETTING) {
+                return false;
+            }
+            if (current != ServerState.LIVE && current != ServerState.READY) {
+                throw new IllegalStateException(
+                    "Cannot mark '" + serverId + "' RESETTING from " + current + " after transfer");
+            }
+            if (state.compareAndSet(current, ServerState.RESETTING)) {
+                logger.info("[linkedhardcore] Server '{}': {} -> resetting", serverId, current.wireName());
+                return true;
+            }
+        }
+    }
+
     @Override
     public String toString() {
         return serverId + "=" + state.get().wireName();

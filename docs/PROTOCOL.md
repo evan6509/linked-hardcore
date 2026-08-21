@@ -64,7 +64,8 @@ Proxy behaviour (`TransferHandler#onPlayerDied`):
    - If none does, sends `WAIT_FOR_SERVER` and records a pending transfer.
 3. On `TRANSFER_READY` (sent after the mod's on-screen countdown), transfers every
    player on the proxy to the chosen destination.
-4. Flags the vacated server for reset.
+4. Waits for every connection request to complete successfully and confirms the source is empty.
+5. Flags the vacated server for reset only after that confirmation.
 
 ### `PREPARE_TRANSFER` — opcode `0x02` (proxy → mod)
 
