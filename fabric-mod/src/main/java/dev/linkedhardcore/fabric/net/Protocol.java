@@ -52,6 +52,12 @@ import java.util.UUID;
  *
  *  [0x06] WAIT_FOR_SERVER   proxy -> mod
  *      byte  opcode = 0x06
+ *
+ *  [0x07] DEATH_COUNTERS    proxy -> mod
+ *      varint count, then UUID + UTF-8 name + varint deaths per player
+ *
+ *  [0x08] RUN_TIMER         proxy -> mod
+ *      long elapsedMillis, byte ended (0 or 1)
  * </pre>
  */
 public final class Protocol {
@@ -66,6 +72,7 @@ public final class Protocol {
     public static final byte OP_TRANSFER_READY = 0x05;
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
     public static final byte OP_DEATH_COUNTERS = 0x07;
+    public static final byte OP_RUN_TIMER = 0x08;
 
     private Protocol() {
     }
@@ -103,7 +110,10 @@ public final class Protocol {
     public record DeathCounter(UUID playerUuid, String playerName, int deaths) {
     }
 
-    public record Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters) {
+    public record RunTimer(long elapsedMillis, boolean ended) {
+    }
+
+    public record Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters, RunTimer runTimer) {
         public boolean isPrepareTransfer() {
             return opcode == OP_PREPARE_TRANSFER;
         }
@@ -119,36 +129,50 @@ public final class Protocol {
         public boolean isDeathCounters() {
             return opcode == OP_DEATH_COUNTERS;
         }
+
+        public boolean isRunTimer() {
+            return opcode == OP_RUN_TIMER;
+        }
     }
 
     /** Decodes a raw payload frame received from the proxy. */
     public static Inbound decode(byte[] data) {
         if (data == null || data.length == 0) {
-            return new Inbound((byte) 0, null, List.of());
+            return new Inbound((byte) 0, null, List.of(), null);
         }
         FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.wrappedBuffer(data));
         try {
             byte opcode = buf.readByte();
             return switch (opcode) {
-                case OP_PREPARE_TRANSFER -> new Inbound(opcode, null, List.of());
-                case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null, List.of());
+                case OP_PREPARE_TRANSFER -> new Inbound(opcode, null, List.of(), null);
+                case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null, List.of(), null);
                 case OP_ACK -> buf.readableBytes() == 16
-                    ? new Inbound(opcode, buf.readUUID(), List.of()) : new Inbound((byte) 0, null, List.of());
+                    ? new Inbound(opcode, buf.readUUID(), List.of(), null) : new Inbound((byte) 0, null, List.of(), null);
                 case OP_DEATH_COUNTERS -> {
                     int count = buf.readVarInt();
                     if (count < 0 || count > 10_000) {
-                        yield new Inbound((byte) 0, null, List.of());
+                        yield new Inbound((byte) 0, null, List.of(), null);
                     }
                     List<DeathCounter> counters = new ArrayList<>(count);
                     for (int i = 0; i < count; i++) {
                         counters.add(new DeathCounter(buf.readUUID(), buf.readUtf(32_767), buf.readVarInt()));
                     }
-                    yield new Inbound(opcode, null, List.copyOf(counters));
+                    yield new Inbound(opcode, null, List.copyOf(counters), null);
                 }
-                default -> new Inbound(opcode, null, List.of());
+                case OP_RUN_TIMER -> {
+                    if (buf.readableBytes() != 9) {
+                        yield new Inbound((byte) 0, null, List.of(), null);
+                    }
+                    long elapsedMillis = buf.readLong();
+                    int ended = buf.readUnsignedByte();
+                    yield elapsedMillis >= 0 && ended <= 1
+                        ? new Inbound(opcode, null, List.of(), new RunTimer(elapsedMillis, ended == 1))
+                        : new Inbound((byte) 0, null, List.of(), null);
+                }
+                default -> new Inbound(opcode, null, List.of(), null);
             };
         } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
-            return new Inbound((byte) 0, null, List.of());
+            return new Inbound((byte) 0, null, List.of(), null);
         } finally {
             buf.release();
         }

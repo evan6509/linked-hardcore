@@ -153,6 +153,10 @@ public final class ProxyMessenger implements TransferReadyNotifier {
             LOGGER.debug("[linkedhardcore] Updated death counter display with {} record(s)", msg.deathCounters().size());
             return;
         }
+        if (msg.isRunTimer()) {
+            DeathCounterDisplay.applyRunTimer(server, msg.runTimer());
+            return;
+        }
         if (msg.isWaitForServer()) {
             LOGGER.info("[linkedhardcore] WAIT_FOR_SERVER received");
             transferCountdown.waitForServer(server);

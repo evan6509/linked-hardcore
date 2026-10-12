@@ -15,6 +15,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ProtocolTest {
 
     @Test
+    void decodesRunTimersAndRejectsMalformedSnapshots() {
+        byte[] frame = ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
+            .putLong(3_723_456L).put((byte) 1).array();
+        Protocol.Inbound inbound = Protocol.decode(frame);
+        assertTrue(inbound.isRunTimer());
+        assertEquals(new Protocol.RunTimer(3_723_456L, true), inbound.runTimer());
+        frame[9] = 0;
+        assertEquals(new Protocol.RunTimer(3_723_456L, false), Protocol.decode(frame).runTimer());
+        frame[9] = 2;
+        assertFalse(Protocol.decode(frame).isRunTimer());
+        assertFalse(Protocol.decode(new byte[] {Protocol.OP_RUN_TIMER}).isRunTimer());
+        assertFalse(Protocol.decode(java.util.Arrays.copyOf(frame, 11)).isRunTimer());
+        assertFalse(Protocol.decode(ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
+            .putLong(-1).put((byte) 0).array()).isRunTimer());
+    }
+
+    @Test
     void encodesPlayerDeathsInTheSharedWireFormat() {
         UUID player = UUID.fromString("12345678-1234-5678-9abc-def012345678");
         byte[] expected = ByteBuffer.allocate(17)

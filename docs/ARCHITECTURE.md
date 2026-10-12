@@ -60,6 +60,11 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
 - **Death counters.** The proxy persists the authoritative per-player totals in
   `death-counters.json`, broadcasts snapshots to backends, and the Fabric mod
   renders them in a sidebar. World resets do not erase the totals.
+- **Current run timer.** The proxy measures shared play time with a monotonic
+  clock, pauses when everyone is offline, and checkpoints `run-timer.json` every
+  second during play. It freezes the timer on an accepted death and resets it
+  after a successful transfer. Backends receive `RUN_TIMER` snapshots and render
+  `HH:MM:SS` above the death totals in the same sidebar.
 - **Polls readiness.** `StatusPoller` reads each backend's one-second
   `status.json` heartbeat. A backend is `UNAVAILABLE` until it reports a fresh
   `ready` + `playerCount 0` snapshot, and becomes unavailable again when the
@@ -118,7 +123,8 @@ each other's APIs. They only communicate over `linkedhardcore:main` with a
 byte-exact protocol. See `docs/PROTOCOL.md`.
 
 - Mod → proxy: clientbound custom payloads (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`).
-- Proxy → mod: serverbound custom payloads (`PREPARE_TRANSFER`, `ACK`).
+- Proxy → mod: serverbound custom payloads (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`,
+  `ACK`, `DEATH_COUNTERS`, `RUN_TIMER`).
 
 The proxy gatekeeps both directions: it registers the channel in its
 `ChannelRegistrar` and sets `ForwardResult.handled()`, and it only accepts
