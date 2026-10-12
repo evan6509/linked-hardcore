@@ -10,10 +10,21 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ProtocolTest {
 
     private static final UUID PLAYER = UUID.fromString("12345678-1234-5678-9abc-def012345678");
+
+    @Test
+    void encodesRunTimeAsMillisecondsAndAnEndedFlag() {
+        byte[] expected = ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
+            .putLong(3_723_456L).put((byte) 1).array();
+        assertArrayEquals(expected, Protocol.encodeRunTimer(3_723_456L, true));
+        assertArrayEquals(ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
+            .putLong(0).put((byte) 0).array(), Protocol.encodeRunTimer(0, false));
+        assertThrows(IllegalArgumentException.class, () -> Protocol.encodeRunTimer(-1, false));
+    }
 
     @Test
     void decodesTheFabricPlayerDiedFrame() {

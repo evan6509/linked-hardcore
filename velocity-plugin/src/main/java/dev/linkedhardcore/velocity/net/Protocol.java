@@ -56,6 +56,12 @@ import java.util.UUID;
  *
  *  [0x06] WAIT_FOR_SERVER  proxy -> mod
  *      byte  opcode = 0x06
+ *
+ *  [0x07] DEATH_COUNTERS   proxy -> mod
+ *      varint count, then UUID + UTF-8 name + varint deaths per player
+ *
+ *  [0x08] RUN_TIMER        proxy -> mod
+ *      long elapsedMillis, byte ended (0 or 1)
  * </pre>
  */
 public final class Protocol {
@@ -70,6 +76,7 @@ public final class Protocol {
     public static final byte OP_TRANSFER_READY = 0x05;
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
     public static final byte OP_DEATH_COUNTERS = 0x07;
+    public static final byte OP_RUN_TIMER = 0x08;
 
     private Protocol() {
     }
@@ -153,6 +160,18 @@ public final class Protocol {
             writeString(out, counter.playerName());
             writeVarInt(out, counter.deaths());
         }
+        return out.toByteArray();
+    }
+
+    /** RUN_TIMER: opcode + elapsed milliseconds (long) + ended flag (0 or 1). */
+    public static byte[] encodeRunTimer(long elapsedMillis, boolean ended) {
+        if (elapsedMillis < 0) {
+            throw new IllegalArgumentException("Negative run duration");
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(OP_RUN_TIMER);
+        out.writeLong(elapsedMillis);
+        out.writeBoolean(ended);
         return out.toByteArray();
     }
 

@@ -20,6 +20,9 @@ import dev.linkedhardcore.velocity.reset.FileResetSignaller;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
 import dev.linkedhardcore.velocity.routing.ServerLifecycleListener;
 import dev.linkedhardcore.velocity.routing.TransferHandler;
+import dev.linkedhardcore.velocity.timer.RunTimer;
+import dev.linkedhardcore.velocity.timer.RunTimerState;
+import dev.linkedhardcore.velocity.timer.RunTimerStore;
 import dev.linkedhardcore.velocity.status.StatusPoller;
 import org.slf4j.Logger;
 
@@ -53,6 +56,7 @@ public final class LinkedHardcorePlugin {
     private StatusPoller statusPoller;
     private DeathCounterStore deathCounterStore;
     private DeathCounterState deathCounters;
+    private RunTimer runTimer;
 
     @Inject
     public LinkedHardcorePlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -86,12 +90,19 @@ public final class LinkedHardcorePlugin {
         this.deathCounterStore = new DeathCounterStore(dataDirectory.resolve("death-counters.json"), logger);
         deathCounterStore.loadInto(deathCounters);
 
+        RunTimerState runState = new RunTimerState();
+        RunTimerStore runStore = new RunTimerStore(dataDirectory.resolve("run-timer.json"), logger);
+        runStore.loadInto(runState);
+        this.runTimer = new RunTimer(proxy, config, runState, runStore);
+
         ResetSignaller resetSignaller = new FileResetSignaller(config, logger);
         this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger,
-            deathCounters, deathCounterStore::save);
+            deathCounters, deathCounterStore::save, runTimer::endRun, runTimer::startNewRun);
 
         proxy.getEventManager().register(this, new ProxyMessageListener(transferHandler, logger));
         proxy.getEventManager().register(this, new ServerLifecycleListener(proxy, config, servers, logger, deathCounters));
+        proxy.getEventManager().register(this, runTimer);
+        runTimer.start(this);
 
         registerCommand(config);
 
@@ -114,6 +125,9 @@ public final class LinkedHardcorePlugin {
     public void onProxyShutdown(ProxyShutdownEvent event) {
         if (statusPoller != null) {
             statusPoller.stop();
+        }
+        if (runTimer != null) {
+            runTimer.stop();
         }
         logger.info("[linkedhardcore] Shutting down.");
     }

@@ -40,6 +40,8 @@ public final class TransferHandler {
     private final Logger logger;
     private final DeathCounterState deathCounters;
     private final Consumer<DeathCounterState> persistDeathCounters;
+    private final Runnable onRunEnded;
+    private final Runnable onNewRun;
 
     private final Object transferLock = new Object();
     private PendingTransfer pending;
@@ -52,6 +54,14 @@ public final class TransferHandler {
     public TransferHandler(ProxyServer proxy, PluginConfig config,
                            Map<String, ServerStatus> servers, ResetSignaller resetSignaller, Logger logger,
                            DeathCounterState deathCounters, Consumer<DeathCounterState> persistDeathCounters) {
+        this(proxy, config, servers, resetSignaller, logger, deathCounters, persistDeathCounters,
+            () -> { }, () -> { });
+    }
+
+    public TransferHandler(ProxyServer proxy, PluginConfig config,
+                           Map<String, ServerStatus> servers, ResetSignaller resetSignaller, Logger logger,
+                           DeathCounterState deathCounters, Consumer<DeathCounterState> persistDeathCounters,
+                           Runnable onRunEnded, Runnable onNewRun) {
         this.proxy = proxy;
         this.config = config;
         this.servers = servers;
@@ -59,6 +69,8 @@ public final class TransferHandler {
         this.logger = logger;
         this.deathCounters = deathCounters;
         this.persistDeathCounters = persistDeathCounters;
+        this.onRunEnded = onRunEnded;
+        this.onNewRun = onNewRun;
     }
 
     /** ACKs a death and starts one serialized transfer for the shared life pool. */
@@ -92,6 +104,7 @@ public final class TransferHandler {
             String playerName = player == null ? playerUuid.toString() : player.getUsername();
             deathCounters.recordDeath(playerUuid, playerName);
             deathRecorded = true;
+            onRunEnded.run();
             attemptTransferLocked();
         }
 
@@ -252,6 +265,7 @@ public final class TransferHandler {
             }
             pending = null;
             resetTargets = targets;
+            onNewRun.run();
         }
 
         for (String sourceName : resetTargets) {

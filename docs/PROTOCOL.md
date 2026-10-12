@@ -24,7 +24,7 @@ proxy does not fire `PluginMessageEvent` for it.
 - Direction is defined by Minecraft's custom-payload semantics:
   - **Mod → proxy** (`PLAYER_DIED`, `RESET_COMPLETE`, `TRANSFER_READY`): clientbound
     custom payload (registered in `PayloadTypeRegistry.clientboundPlay()`).
-  - **Proxy → mod** (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`, `ACK`, `DEATH_COUNTERS`): serverbound custom
+  - **Proxy → mod** (`PREPARE_TRANSFER`, `WAIT_FOR_SERVER`, `ACK`, `DEATH_COUNTERS`, `RUN_TIMER`): serverbound custom
     payload (registered in `PayloadTypeRegistry.serverboundPlay()`).
 - The proxy intercepts these at `PluginMessageEvent`; `getData()` returns the
   raw frame bytes exactly as described below. On the Fabric side the payload is a
@@ -142,6 +142,25 @@ repeat counterCount times:
   byte[]   playerName UTF-8 bytes
   varint   deaths
 ```
+
+### `RUN_TIMER` — opcode `0x08` (proxy → mod)
+
+Sent once per second to occupied configured backends and immediately on joins,
+disconnects, accepted deaths, and successful transfers. The Fabric mod displays
+the shared run time above the player death totals without using the action bar.
+
+```
+byte[1]   opcode = 0x08
+byte[8]   elapsedMillis (non-negative signed long, big-endian)
+byte[1]   ended (0 = current run, 1 = ended by a death)
+```
+
+The frame must be exactly ten bytes, with an ended flag of 0 or 1. The proxy
+measures elapsed play with a monotonic clock, pauses when no linked players are
+online, and persists snapshots in `run-timer.json`. A restored timer stays paused
+until a player joins; downtime is excluded. Death freezes the duration, and only
+a successfully completed transfer resets it to zero. Duplicate deaths and failed
+transfers do not reset the timer.
 
 ## Reliability / failure detection
 

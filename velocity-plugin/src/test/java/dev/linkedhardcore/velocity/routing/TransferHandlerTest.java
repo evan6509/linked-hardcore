@@ -7,6 +7,7 @@ import com.velocitypowered.api.proxy.ServerConnection;
 import com.velocitypowered.api.proxy.server.RegisteredServer;
 import com.velocitypowered.api.proxy.server.ServerInfo;
 import dev.linkedhardcore.velocity.config.PluginConfig;
+import dev.linkedhardcore.velocity.death.DeathCounterState;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
@@ -23,6 +24,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -44,6 +46,8 @@ class TransferHandlerTest {
     private final ResetSignaller resetSignaller = mock(ResetSignaller.class);
     private final AtomicReference<Collection<Player>> alphaPlayers = new AtomicReference<>();
     private final AtomicReference<Collection<Player>> betaPlayers = new AtomicReference<>();
+    private final AtomicInteger endedRuns = new AtomicInteger();
+    private final AtomicInteger newRuns = new AtomicInteger();
 
     private TransferHandler handler;
     private Map<String, ServerStatus> statuses;
@@ -83,7 +87,8 @@ class TransferHandlerTest {
         statuses.put("beta", new ServerStatus("beta", ServerState.READY));
         statuses.put("gamma", new ServerStatus("gamma", ServerState.READY));
         handler = new TransferHandler(proxy, new PluginConfig(backends, 1), statuses, resetSignaller,
-            LoggerFactory.getLogger("test"));
+            LoggerFactory.getLogger("test"), new DeathCounterState(), ignored -> { },
+            endedRuns::incrementAndGet, newRuns::incrementAndGet);
     }
 
     @Test
@@ -98,6 +103,8 @@ class TransferHandlerTest {
         verify(resetSignaller, never()).signalReset(any());
         assertEquals(ServerState.LIVE, statuses.get("alpha").state());
         assertEquals(ServerState.READY, statuses.get("beta").state());
+        assertEquals(1, endedRuns.get());
+        assertEquals(0, newRuns.get());
     }
 
     @Test
@@ -109,12 +116,15 @@ class TransferHandlerTest {
 
         handler.onPlayerDied(source, UUID.randomUUID());
         handler.onTransferReady(source);
+        assertEquals(1, endedRuns.get());
+        assertEquals(0, newRuns.get());
         alphaPlayers.set(List.of());
         connection.complete(result);
 
         verify(resetSignaller).signalReset("logical-a");
         assertEquals(ServerState.RESETTING, statuses.get("alpha").state());
         assertEquals(ServerState.LIVE, statuses.get("beta").state());
+        assertEquals(1, newRuns.get());
     }
 
     @Test
@@ -127,6 +137,8 @@ class TransferHandlerTest {
         verify(alpha, org.mockito.Mockito.times(2)).sendPluginMessage(any(), any(byte[].class));
         assertEquals(ServerState.TRANSFERRING, statuses.get("alpha").state());
         assertTrue(statuses.get("beta").is(ServerState.READY));
+        assertEquals(1, endedRuns.get());
+        assertEquals(0, newRuns.get());
     }
 
     @Test

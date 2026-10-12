@@ -15,6 +15,19 @@ Ping-pong forever. Works with any number of players and any number of servers.
   countdown, respawn-on-arrival, status file reporting. Installed identically on
   both servers.
 
+The in-game death-counter sidebar also shows **Run: HH:MM:SS** for the shared
+current run. It starts when the first player joins a configured backend, pauses
+while everyone is offline, and resumes on reconnect. An accepted death freezes
+the final time as **Run ended** throughout the wait and transfer countdown. The
+timer resets only after the group successfully transfers into the next world;
+a failed transfer leaves the final time frozen.
+
+The proxy saves the timer in `plugins/linkedhardcore/run-timer.json`, outside the
+resettable worlds. Ordinary server/proxy restarts preserve the elapsed time and
+exclude downtime; active play is checkpointed every second. Install the updated
+proxy plugin and Fabric mod on all backends to enable the display. When first
+installed, timing begins at the first join; earlier play time cannot be recovered.
+
 See `docs/ARCHITECTURE.md` for the full picture, `docs/PROTOCOL.md` for the wire
 protocol, and `docs/RESET_CONTRACT.md` for the reset-agent contract.
 
