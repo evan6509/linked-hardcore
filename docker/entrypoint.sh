@@ -126,7 +126,8 @@ run_server() {
     log "server pid $server_pid"
 
     # Forward TERM/INT (e.g. `docker compose down`) to the JVM and exit cleanly.
-    trap 'log "signal received; stopping server"; kill -TERM "$server_pid" 2>/dev/null || true; wait "$server_pid" 2>/dev/null || true; exit 0' TERM INT
+    # Bound shutdown waits so a hung JVM cannot prevent a container restart.
+    trap 'log "signal received; stopping server"; kill -TERM "$server_pid" 2>/dev/null || true; for _ in $(seq 1 30); do kill -0 "$server_pid" 2>/dev/null || break; sleep 1; done; if kill -0 "$server_pid" 2>/dev/null; then kill -KILL "$server_pid" 2>/dev/null || true; fi; wait "$server_pid" 2>/dev/null || true; exit 0' TERM INT
 
     # Watch for reset.request.json (written by the proxy's FileResetSignaller) and
     # for the server exiting on its own. Either way we exit; the docker restart
@@ -135,6 +136,15 @@ run_server() {
         if [ -f "$reset_file" ] && reset_is_safe "$data_dir"; then
             log "reset requested; stopping server JVM"
             kill -TERM "$server_pid" 2>/dev/null || true
+            # Allow up to 30 seconds for a clean stop, then force a hung JVM down.
+            for _ in $(seq 1 30); do
+                kill -0 "$server_pid" 2>/dev/null || break
+                sleep 1
+            done
+            if kill -0 "$server_pid" 2>/dev/null; then
+                log "JVM did not exit after TERM; sending SIGKILL"
+                kill -KILL "$server_pid" 2>/dev/null || true
+            fi
             wait "$server_pid" 2>/dev/null || true
             wipe_world "$data_dir"
             rm -f "$reset_file"
