@@ -12,7 +12,9 @@ The lifecycle records:
   and the accepted death-counter record.
 - Source generations still awaiting publication of their reset requests.
 
-An accepted death is checkpointed before the proxy ACKs it or starts a countdown.
+An accepted death is checkpointed before the proxy publishes its pending transfer,
+increments the death counter, ACKs it, or starts a countdown. If that initial write
+fails, the source state is restored and the death can be retried without double counting.
 The source remains an ended run until a handoff commits. A proxy restart restores
 that pending handoff and the accepted counter record instead of reopening the
 source world in survival.
@@ -37,10 +39,12 @@ reset. Missing/booting status is retried when the source publishes its actual bo
 identity. Cleanup remains durable until `reset.pending.json` is published; a source
 already changed to another generation is not wiped again.
 
-A connection approved just before a death may finish after its source is retired.
-The post-connect handler rejects that stale arrival, with a message to reconnect
-into the current run. It cannot change the saved pointer back to the ended world.
-Arrivals at a still-participating source are put back into its wait/countdown flow.
+A connection approved just before a death may finish after connection fan-out starts.
+The post-connect handler rejects that late source arrival, with a message to reconnect
+into the current run, because it is outside the captured connection futures. Source
+arrivals remain rejected during recovery and after retirement; they cannot change
+the saved pointer back to the ended world. Before fan-out, source arrivals are put
+back into the wait/countdown flow.
 
 The first arrival receives counters through its active `ServerConnection` after
 `ServerPostConnectEvent`, avoiding the earlier event where the backend had no

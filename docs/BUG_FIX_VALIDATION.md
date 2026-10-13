@@ -19,18 +19,20 @@ A Java 25 Gradle build completed successfully using temporary build outputs. Wor
 | Module | Tests | Failures | Errors | Skipped |
 |--------|-------|----------|--------|---------|
 | fabric-mod | 11 | 0 | 0 | 0 |
-| velocity-plugin | 50 | 0 | 0 | 0 |
+| velocity-plugin | 56 | 0 | 0 | 0 |
 
 Regressions cover used empty worlds after startup, current-world reconnects after proxy restart, the request-publication gap, unavailable resets, delayed/id-only completion messages, conflicting reset expectations, remaining request files, player-arrival use persistence, concurrent ordered status publication, and A-to-B-to-regenerated-A transfers. The last test invokes the real shell executor on disposable world directories and verifies removal of old-world sentinels.
 
 Lifecycle tests cover restart during waiting/countdown/connecting/commit, offline handoffs and destination replacement, cleanup retry, corrupt checkpoint admission rejection, stale timer epochs, late source arrivals, and first-carrier counter delivery. Respawn tests verify the vanilla handler invocation and spectator mode on the replacement entity. Inspection of the pinned Minecraft/Velocity bytecode confirms the corresponding respawn and connection/event ordering; it does not substitute for gameplay.
+
+PR review regressions also verify that source arrivals are disconnected once connection fan-out begins, allowing the captured transfer to commit; recovery rejects new source arrivals while retaining destination arrivals. Waiting/countdown source arrivals remain supported. A real atomic-write failure leaves the pending transfer unpublished, preserves both absent and existing death-counter records, restores source state, and sends no ACK. Repeated failures followed by a successful retry count the death exactly once, with the accepted record recoverable after restart.
 
 Final runtime JAR SHA-256 values:
 
 | Artifact | SHA-256 |
 |----------|---------|
 | `fabric-mod/build/libs/fabric-mod-0.1.0.jar` | `96646dda4a4266654793bc3faefdb74bd661f160de3320ac8a8800bcf09a4710` |
-| `velocity-plugin/build/libs/velocity-plugin-0.1.0.jar` | `667357eb3c04a2e1698b68b2858fe1136407201cd40c9582443cac174905219d` |
+| `velocity-plugin/build/libs/velocity-plugin-0.1.0.jar` | `fca3432236738207db213483ff2622b02bfd111cb86a30385c25e2756b186fdb` |
 
 ## Executor and real Minecraft smoke
 

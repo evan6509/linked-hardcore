@@ -1,5 +1,6 @@
 package dev.linkedhardcore.velocity.routing;
 
+import com.velocitypowered.api.event.player.ServerPostConnectEvent;
 import com.velocitypowered.api.proxy.ConnectionRequestBuilder;
 import com.velocitypowered.api.proxy.Player;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -10,10 +11,14 @@ import dev.linkedhardcore.velocity.config.PluginConfig;
 import dev.linkedhardcore.velocity.death.DeathCounterState;
 import dev.linkedhardcore.velocity.model.ServerState;
 import dev.linkedhardcore.velocity.model.ServerStatus;
+import dev.linkedhardcore.velocity.net.Protocol;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.mockito.ArgumentCaptor;
 import dev.linkedhardcore.velocity.status.BackendFixture;
 import dev.linkedhardcore.velocity.reset.ResetRequest;
 import dev.linkedhardcore.velocity.reset.FileResetSignaller;
@@ -33,6 +38,7 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
@@ -40,6 +46,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.times;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
@@ -507,6 +515,119 @@ class TransferHandlerTest {
         assertFalse(handler.onBackendJoined("alpha"));
         var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
         assertEquals("beta", saved.get("serverName").getAsString());
+    }
+
+    @Test
+    void lateSourceArrivalAfterFanOutIsDisconnectedAndDoesNotBlockCommit() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        CompletableFuture<ConnectionRequestBuilder.Result> connection = new CompletableFuture<>();
+        when(request.connect()).thenReturn(connection);
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+
+        Player latePlayer = mock(Player.class);
+        ServerConnection lateConnection = mock(ServerConnection.class);
+        ServerInfo sourceInfo = alpha.getServerInfo();
+        when(lateConnection.getServerInfo()).thenReturn(sourceInfo);
+        when(latePlayer.getCurrentServer()).thenReturn(Optional.of(lateConnection));
+        alphaPlayers.set(List.of(latePlayer));
+        doAnswer(ignored -> {
+            alphaPlayers.set(List.of());
+            return null;
+        }).when(latePlayer).disconnect(any());
+        new ServerLifecycleListener(handler, new DeathCounterState()).onServerConnected(
+            new ServerPostConnectEvent(latePlayer, null));
+
+        verify(latePlayer).disconnect(any());
+        verify(lateConnection, never()).sendPluginMessage(any(), any(byte[].class));
+        ConnectionRequestBuilder.Result result = mock(ConnectionRequestBuilder.Result.class);
+        when(result.isSuccessful()).thenReturn(true);
+        connection.complete(result);
+        assertEquals(1, newRuns.get());
+        assertEquals(ServerState.RESETTING, statuses.get("alpha").state());
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals("beta", saved.get("serverName").getAsString());
+        assertFalse(saved.has("pendingTransfer"));
+    }
+
+    @Test
+    void sourceArrivalsAreRejectedDuringRecoveryButDestinationArrivalsRemainAllowed() throws Exception {
+        CompletableFuture<ConnectionRequestBuilder.Result> connection = new CompletableFuture<>();
+        when(request.connect()).thenReturn(connection);
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+        connection.complete(mock(ConnectionRequestBuilder.Result.class));
+
+        assertFalse(handler.onBackendJoined("alpha"));
+        assertTrue(handler.onBackendJoined("beta"));
+        assertEquals(0, newRuns.get());
+        verify(resetSignaller, never()).signalReset(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void sourceArrivalsBeforeFanOutRemainInTheWaitOrCountdownFlow(boolean waiting) throws Exception {
+        if (waiting) {
+            Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+            Files.delete(directory.resolve("c/config/linkedhardcore/status.json"));
+        }
+        handler.onPlayerDied(source, UUID.randomUUID());
+        clearInvocations(alpha);
+
+        assertTrue(handler.onBackendJoined("alpha"));
+        ArgumentCaptor<byte[]> frame = ArgumentCaptor.forClass(byte[].class);
+        verify(alpha).sendPluginMessage(any(), frame.capture());
+        assertArrayEquals(waiting ? Protocol.encodeWaitForServer() : Protocol.encodePrepareTransfer(), frame.getValue());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 7})
+    void failedDeathCheckpointDoesNotAcceptOrCountTheDeathAndCanBeRetried(int previousDeaths) throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        UUID deceased = UUID.randomUUID();
+        DeathCounterState counters = new DeathCounterState();
+        if (previousDeaths > 0) counters.restore(new DeathCounterState.DeathRecord(deceased, "old-name", previousDeaths));
+        List<DeathCounterState.DeathRecord> before = counters.snapshot();
+        AtomicInteger persistedCounters = new AtomicInteger();
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"),
+            counters, ignored -> persistedCounters.incrementAndGet(), endedRuns::incrementAndGet,
+            newRuns::incrementAndGet, lifecycle);
+        handler.initialServer();
+        Path backup = directory.resolve("previous-current-world.json");
+        Files.move(lifecycle, backup);
+        String previousCheckpoint = Files.readString(backup);
+        // A nonempty directory forces the real atomic replacement to fail on all platforms.
+        Files.createDirectory(lifecycle);
+        Path blocker = lifecycle.resolve("blocker");
+        Files.writeString(blocker, "fixture");
+        for (int attempt = 0; attempt < 2; attempt++) {
+            assertThrows(IllegalStateException.class, () -> handler.onPlayerDied(source, deceased));
+            assertEquals(before, counters.snapshot());
+            assertEquals(ServerState.LIVE, statuses.get("alpha").state());
+            assertEquals(0, endedRuns.get());
+            assertEquals(0, persistedCounters.get());
+            verify(source, never()).sendPluginMessage(any(), any(byte[].class));
+            verify(alpha, never()).sendPluginMessage(any(), any(byte[].class));
+            assertEquals(previousCheckpoint, Files.readString(backup));
+        }
+
+        Files.delete(blocker);
+        Files.delete(lifecycle);
+        Files.move(backup, lifecycle);
+        handler.onPlayerDied(source, deceased);
+        handler.onPlayerDied(source, deceased); // A durable duplicate ACK must not count twice.
+        assertEquals(previousDeaths + 1, counters.count(deceased));
+        assertEquals(1, endedRuns.get());
+        assertEquals(1, persistedCounters.get());
+        verify(source, times(2)).sendPluginMessage(any(), any(byte[].class));
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals(previousDeaths + 1, saved.getAsJsonObject("pendingTransfer")
+            .getAsJsonObject("deathCounter").get("deaths").getAsInt());
+        DeathCounterState restored = new DeathCounterState();
+        durableHandler(lifecycle, restored, resetSignaller);
+        assertEquals(previousDeaths + 1, restored.count(deceased));
     }
 
     @Test

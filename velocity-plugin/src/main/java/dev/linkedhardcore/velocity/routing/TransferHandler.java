@@ -174,11 +174,19 @@ public final class TransferHandler {
                 }
                 accepted.sourceGenerations.put(name, identity.generationId());
             }
-            pending = accepted;
             Player player = source.getPlayer();
             String playerName = player == null ? playerUuid.toString() : player.getUsername();
-            pending.deathCounter = deathCounters.recordDeath(playerUuid, playerName);
-            checkpointLifecycle(); // Persist the ended transfer BEFORE accepting or announcing it.
+            accepted.deathCounter = new DeathCounterState.DeathRecord(playerUuid, playerName,
+                deathCounters.count(playerUuid) + 1);
+            try {
+                // Publish in-memory acceptance only after the prospective transfer is durable.
+                checkpointLifecycle(accepted);
+            } catch (IllegalStateException e) {
+                restoreSourceStatesLocked(sourceNames);
+                throw e;
+            }
+            pending = accepted;
+            deathCounters.restore(accepted.deathCounter);
             persistDeathCounters.accept(deathCounters);
             source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid));
             deathRecorded = true;
@@ -361,6 +369,10 @@ public final class TransferHandler {
                 || (config.backendServers().containsKey(name) && (resetFileExists(name, "reset.pending.json")
                     || resetFileExists(name, "reset.request.json")))
                 || (pending == null && currentWorld != null && !currentWorld.serverName.equals(name))) return false;
+            // Connection futures are fixed once fan-out starts; later source arrivals cannot join them.
+            if (pending != null && pending.sourceNames.contains(name)
+                && pending.phase != TransferPhase.WAITING_FOR_DESTINATION
+                && pending.phase != TransferPhase.COUNTDOWN) return false;
             if (pending != null && !pending.sourceNames.contains(name)
                 && !(name.equals(pending.destinationName) && (pending.phase == TransferPhase.CONNECTING
                     || pending.phase == TransferPhase.RECOVERING || pending.phase == TransferPhase.COMMITTING))) return false;
@@ -448,10 +460,14 @@ public final class TransferHandler {
     }
 
     private void checkpointLifecycle() {
+        checkpointLifecycle(pending);
+    }
+
+    private void checkpointLifecycle(PendingTransfer transfer) {
         if (currentWorldFile == null) return;
         SavedLifecycle body = new SavedLifecycle(1, currentWorld == null ? null : currentWorld.serverName,
             currentWorld == null ? null : currentWorld.generationId,
-            pending == null ? null : pending.save(), Map.copyOf(resetAfterTransfer), currentRunId);
+            transfer == null ? null : transfer.save(), Map.copyOf(resetAfterTransfer), currentRunId);
         try {
             FileResetSignaller.writeAtomic(currentWorldFile, GSON.toJson(body));
         } catch (IOException e) {
