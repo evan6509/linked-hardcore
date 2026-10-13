@@ -3,14 +3,14 @@ package dev.linkedhardcore.fabric.death;
 import dev.linkedhardcore.fabric.config.ModConfig;
 import net.minecraft.network.chat.Component;
 import net.minecraft.network.protocol.game.ClientboundSetActionBarTextPacket;
+import net.minecraft.network.protocol.game.ServerboundClientCommandPacket;
+import java.util.List;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.level.GameType;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Handles the post-death flow for the whole linked player pool: everyone is put
@@ -113,10 +113,23 @@ public final class TransferCountdown {
     }
 
     private void spectateAll(MinecraftServer server) {
-        for (ServerPlayer player : server.getPlayerList().getPlayers()) {
-            player.setGameMode(GameType.SPECTATOR);
-            LOGGER.info("[linkedhardcore] Spectating {}", player.getName().getString());
+        // Vanilla respawn replaces the player in this list, so iterate a snapshot.
+        for (ServerPlayer player : List.copyOf(server.getPlayerList().getPlayers())) {
+            spectatePlayer(player);
         }
+    }
+
+    static void spectatePlayer(ServerPlayer player) {
+        if (player.getHealth() <= 0) {
+            // Use the vanilla handler so the connection's player, position and
+            // client load timer are updated along with the respawn packet.
+            var connection = player.connection;
+            connection.handleClientCommand(new ServerboundClientCommandPacket(
+                ServerboundClientCommandPacket.Action.PERFORM_RESPAWN));
+            player = connection.player;
+        }
+        player.setGameMode(GameType.SPECTATOR);
+        LOGGER.info("[linkedhardcore] Spectating {}", player.getName().getString());
     }
 
     private static Component countdownText(int remaining) {

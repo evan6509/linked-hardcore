@@ -67,8 +67,19 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
   `HH:MM:SS` above the death totals in the same sidebar.
 - **Polls readiness.** `StatusPoller` reads each backend's one-second
   `status.json` heartbeat. A backend is `UNAVAILABLE` until it reports a fresh
-  `ready` + `playerCount 0` snapshot, and becomes unavailable again when the
-  heartbeat goes stale. This prevents routing into offline or booting servers.
+  unused `ready` + `playerCount 0` snapshot matching its durable world identity.
+  Pending resets require the expected request ID and a new boot/world generation.
+  Stale heartbeats make a backend unavailable without cancelling its reset.
+  Used empty worlds remain `LIVE` for reconnects; they are not fresh destinations.
+- **Durable handoff recovery.** The current-world checkpoint includes the pending
+  transfer, source/destination generations, run ID, accepted death record, and
+  source cleanup. Restart and all-player logout preserve the ended-run boundary;
+  an offline handoff does not require a plugin-message carrier. Timer commit replay
+  is idempotent for its run ID. See `LIFECYCLE_RECOVERY.md`.
+- **Reconnect routing.** A persisted `current-world.json` directs reconnects to
+  the current run after logout and proxy restarts. An ended run first completes
+  its recovered handoff to the next world. Pending/resetting backends
+  reject new connections. Logout never promotes a used world to `READY`.
 - **Status command.** `/linkedhardcore status` (alias `/lh status`) shows
   per-server state and who's online.
 
@@ -98,23 +109,23 @@ state. `UNAVAILABLE` and `TRANSFERRING` are proxy-only safety states; the other
 states mirror `status.json`.
 
 ```
-UNAVAILABLE --fresh ready heartbeat---> READY
+UNAVAILABLE --verified unused world---> READY
 READY --player joins------------------> LIVE
 LIVE  --transfer starts---------------> TRANSFERRING
 TRANSFERRING --all moves succeed------> RESETTING
-RESETTING --reset complete/ready------> READY
+RESETTING --matching new generation---> READY
 ```
 
 Transitions:
 
 | From       | To          | Trigger |
 |------------|-------------|---------|
-| UNAVAILABLE | READY      | fresh `status.json` reports `ready`, zero players |
+| UNAVAILABLE | READY      | fresh empty unused world matches durable preparation |
 | READY      | LIVE        | a player joins (group member arrives) |
 | LIVE       | TRANSFERRING | linked transfer begins |
 | TRANSFERRING | RESETTING | every requested connection succeeds and sources are empty |
-| TRANSFERRING | LIVE/READY | transfer failure; never reset automatically |
-| RESETTING  | READY       | fresh `status.json` heartbeat reports ready |
+| TRANSFERRING | LIVE | transfer failure; never reset automatically |
+| RESETTING  | READY       | expected request acknowledged by fresh new boot/world |
 
 ## The seam: plugin messaging
 

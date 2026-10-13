@@ -24,11 +24,15 @@ a failed transfer leaves the final time frozen.
 
 The proxy saves the timer in `plugins/linkedhardcore/run-timer.json`, outside the
 resettable worlds. Ordinary server/proxy restarts preserve the elapsed time and
-exclude downtime; active play is checkpointed every second. Install the updated
+exclude downtime; active play is checkpointed every second. Pending death transfers
+are checkpointed with their world identities and recover after a proxy restart.
+When everyone disconnects, the proxy completes the handoff to a prepared new world
+without requiring a player-carried countdown message. Install the updated
 proxy plugin and Fabric mod on all backends to enable the display. When first
 installed, timing begins at the first join; earlier play time cannot be recovered.
 
-See `docs/ARCHITECTURE.md` for the full picture, `docs/PROTOCOL.md` for the wire
+See `docs/LIFECYCLE_RECOVERY.md` for transfer recovery and container-state migration,
+`docs/ARCHITECTURE.md` for the full picture, `docs/PROTOCOL.md` for the wire
 protocol, and `docs/RESET_CONTRACT.md` for the reset-agent contract.
 
 ## Version matrix
@@ -83,7 +87,8 @@ For **each** backend server, in its own directory:
    B) and `transferCountdownSeconds` (how long the on-screen countdown runs before
    everyone is moved). All players are linked into one life pool — no groups to list.
 7. Restart the server. It writes `config/linkedhardcore/status.json`
-   (`state: "ready"`) on boot.
+   on boot: unused prepared worlds are `ready`; existing used worlds remain `live`,
+   including while empty. Set `pause-when-empty-seconds=0` in `server.properties`.
 
 ### 2. Install the Velocity plugin (the proxy)
 
@@ -126,10 +131,11 @@ For **each** backend server, in its own directory:
 ### 3. Run Sisyphus (external reset agent)
 
 This is a contract, not code in this repo. See `docs/RESET_CONTRACT.md`. In
-summary: watch `status.json` for `state: "resetting"` (or a fresh
-`reset.request.json`), stop the server, delete `world/`, `world_nether/`,
-`world_the_end/`, `playerdata/`, `stats/`, `advancements/`, restart, and wait for
-`state: "ready"`.
+summary: validate the reset request and the backend's fresh empty `resetting`
+heartbeat, stop the JVM, wipe the world/player-data directories, write the
+request's new unused world identity, consume the request, then restart. Retain
+`reset.pending.json` until the proxy verifies the new boot and generation. See
+`docs/RESET_CONTRACT.md` for the complete schema-2 sequence.
 
 ## Local development: two servers + proxy on one machine
 
@@ -157,9 +163,9 @@ Recommended ports (all on `127.0.0.1`):
    restart.
 4. Connect to `127.0.0.1:25565`. Use `/linkedhardcore status` (or `/lh status`)
    on the proxy console / in-game to see server states and who's online.
-5. For iteration, manually simulate Sisyphus: when a server shows `resetting`,
-   stop it, delete its world dirs, restart it — the proxy will flip it back to
-   `READY` via `status.json`/`RESET_COMPLETE`.
+5. For iteration, follow the schema-2 executor sequence in
+   `docs/RESET_CONTRACT.md`. Deleting a world and restarting without writing the
+   matching generation identity is not sufficient to acknowledge a reset.
 
 ## Containers (Docker Compose)
 
@@ -196,6 +202,7 @@ the runtime is then fully offline).
 | `SERVER_ID` | `a` | server | Logical id written to the mod's `config.json` (`a`/`b`) |
 | `FORWARDING_SECRET` | `linkedhardcore-dev-secret-change-me` | proxy + servers | Velocity modern-forwarding secret; injected into Velocity's secret file and FabricProxy-Lite (`FABRIC_PROXY_SECRET`) |
 | `TRANSFER_COUNTDOWN_SECONDS` | `5` | server | On-screen countdown before the group is transferred (mod `config.json`) |
+| `PROXY_DIR` | `/lh/proxy` | proxy | Runtime directory on the persistent volume; the image install remains separate |
 | `MC_MEMORY` | proxy `512M`, servers `3G` | both | JVM `-Xmx` |
 | `VELOCITY_PORT` | `25577` | proxy | Proxy bind port and host port mapping |
 
@@ -204,28 +211,21 @@ dev default works out of the box but is not secret.
 
 ### How the reset loop works in containers
 
-The reset agent is the **entrypoint script**, not extra Java code — the mod and
-plugin are untouched, and the bare-metal contract in `docs/RESET_CONTRACT.md`
-still holds for external agents.
+The entrypoint performs world deletion after the JVM stops. The proxy writes a
+unique reset request plus a durable expectation when a transferred source is
+empty. The executor waits for the matching empty heartbeat, stops the JVM, wipes
+its world/player-data directories, records the request's unused generation, and
+exits. Docker restarts the container; the proxy accepts only the matching new
+boot's fresh heartbeat. Used standby worlds are prepared when a death needs a
+new run. Ordinary restarts and logout preserve the current world.
 
-1. A player dies on server A. The mod sends `PLAYER_DIED`; the proxy ACKs and, if
-   server B is `READY`, sends `PREPARE_TRANSFER`. After the countdown everyone is
-   transferred to B. The proxy marks A `RESETTING` and writes
-   `config/linkedhardcore/reset.request.json` (shared volume) next to A's
-   `status.json`.
-2. A's entrypoint watcher waits until `status.json` confirms `resetting` with
-   zero players, then stops the JVM cleanly, **deletes the world dirs**, removes
-   `reset.request.json`, and exits.
-3. `restart: unless-stopped` restarts A's container. The entrypoint re-templates
-   the configs, boots a fresh world, and the mod reports `state: "ready"`.
-4. The proxy's status poller sees `ready` + `playerCount: 0` and flips A back to
-   `READY`, ready to receive the next transfer. Ping-pong forever.
-
-Data lives in a single named volume `lh-data` (mounted at `/lh`) shared by all
-three services — each backend in `/lh/server-a` and `/lh/server-b`. The shared
-volume is what lets the proxy read `status.json` and write `reset.request.json`.
-A world is wiped **only** when a reset was requested; an ordinary restart (host
-reboot, crash) keeps the world, matching the Sisyphus contract.
+Reconnects use `plugins/linkedhardcore/current-world.json` to resume the current
+run, including a pending handoff for an ended run. Proxy state now lives at
+`/lh/proxy` inside the named volume; see `docs/LIFECYCLE_RECOVERY.md` before
+recreating an older container whose state was stored under `/opt`.
+All reset/preparation metadata lives outside resettable worlds. Schema-2
+changes require updating the proxy, mods, and executor together; see
+`docs/RESET_CONTRACT.md` for upgrade and validation instructions.
 
 ### Playing / operating
 

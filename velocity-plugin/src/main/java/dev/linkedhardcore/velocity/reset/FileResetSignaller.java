@@ -9,7 +9,8 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.time.Instant;
+import java.nio.file.StandardCopyOption;
+import java.nio.file.AtomicMoveNotSupportedException;
 import java.util.Map;
 import java.util.stream.Collectors;
 
@@ -18,15 +19,9 @@ import java.util.stream.Collectors;
  * the backend's {@code status.json} (i.e. into
  * {@code <server>/config/linkedhardcore/}).
  *
- * <p>The external reset agent (Sisyphus) is contracted to watch for this file
- * (see {@code docs/RESET_CONTRACT.md}). The file format:
- * <pre>{@code
- * {
- *   "schemaVersion": 1,
- *   "serverId": "a",
- *   "requestedAt": "2026-08-12T10:00:00Z"
- * }
- * }</pre>
+ * <p>The schema-2 request includes a unique request ID and the previous
+ * boot/world identities. The expectation is persisted before request publication.
+ * See {@code docs/RESET_CONTRACT.md} for the executor and completion sequence.
  *
  * <p>Alternative (not implemented): a local webhook POST for cross-host setups.
  */
@@ -47,18 +42,34 @@ public final class FileResetSignaller implements ResetSignaller {
     }
 
     @Override
-    public void signalReset(String serverId) throws IOException {
+    public synchronized void signalReset(ResetRequest request) throws IOException {
+        String serverId = request.serverId();
+        if (!request.validFor(serverId)) throw new IOException("Invalid reset request for '" + serverId + "'");
         Path dir = serverDirectories.get(serverId);
         if (dir == null) {
             throw new IOException("No configured backend for serverId '" + serverId + "'");
         }
         Files.createDirectories(dir);
         Path target = dir.resolve("reset.request.json");
-        ResetRequest body = new ResetRequest(1, serverId, Instant.now().toString());
-        Files.writeString(target, GSON.toJson(body), StandardCharsets.UTF_8);
+        // Persist the expectation first. A crash or a poll between these writes
+        // cannot admit the old ready heartbeat, even after a proxy restart.
+        writeAtomic(dir.resolve("reset.pending.json"), GSON.toJson(request));
+        writeAtomic(target, GSON.toJson(request));
         logger.info("[linkedhardcore] Wrote reset request for '{}' -> {}", serverId, target);
     }
 
-    private record ResetRequest(int schemaVersion, String serverId, String requestedAt) {
+    public static void writeAtomic(Path target, String json) throws IOException {
+        Files.createDirectories(target.getParent());
+        Path temporary = Files.createTempFile(target.getParent(), target.getFileName().toString(), ".tmp");
+        try {
+            Files.writeString(temporary, json, StandardCharsets.UTF_8);
+            try {
+                Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            } catch (AtomicMoveNotSupportedException ignored) {
+                Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING);
+            }
+        } finally {
+            Files.deleteIfExists(temporary);
+        }
     }
 }

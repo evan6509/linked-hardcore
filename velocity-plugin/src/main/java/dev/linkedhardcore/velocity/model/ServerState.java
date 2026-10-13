@@ -26,7 +26,7 @@ public enum ServerState {
     /** Idle and empty; a freshly reset (or never-used) server. Ready to receive a transfer. */
     READY,
 
-    /** Currently hosting one or more active pairs. */
+    /** A used current/resumable world; may be empty after logout. */
     LIVE,
 
     /** A linked-life transfer is in progress; lifecycle events must not make this server READY. */

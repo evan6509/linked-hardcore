@@ -23,7 +23,7 @@ import org.slf4j.LoggerFactory;
  *       then signal TRANSFER_READY so the proxy moves everyone.</li>
  *   <li>Respawn players into survival when they join after a transfer.</li>
  *   <li>Write {@code status.json} for the external reset agent + proxy to poll.</li>
- *   <li>Report RESET_COMPLETE once ready again after a reset.</li>
+ *   <li>Persist world use and publish the executor's world identity plus a new boot identity.</li>
  * </ul>
  *
  * <p>This mod deliberately has zero compile-time dependency on Velocity APIs;
@@ -50,16 +50,16 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
         // lifecycle snapshot. The proxy will never route a transfer to a stale file.
         final int[] statusHeartbeatTicks = {0};
         ServerLifecycleEvents.SERVER_STARTED.register(server -> {
-            boolean resetPending = writeCurrentStatus(server, statusWriter);
-            if (!resetPending) {
-                messenger.sendResetComplete(server, config.serverId());
-            }
-            LOGGER.info("[linkedhardcore] Server started; status written");
+            writeCurrentStatus(server, statusWriter);
+            LOGGER.info("[linkedhardcore] Server started; publishing status");
         });
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) -> {
-            // Players arrive as spectator after a transfer; respawn them into play.
-            transferCountdown.respawnOnJoin(handler.player);
-            writeCurrentStatus(server, statusWriter);
+            server.execute(() -> {
+                statusWriter.markWorldUsed();
+                // Persist world use before respawning an arriving player into play.
+                transferCountdown.respawnOnJoin(handler.player);
+                statusWriter.write(server::getPlayerCount);
+            });
         });
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             writeCurrentStatus(server, statusWriter);
@@ -80,13 +80,8 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
             LOGGER.info("[linkedhardcore] Server stopping."));
     }
 
-    /** Writes the real current player count; reset requests never fabricate an empty server. */
-    private static boolean writeCurrentStatus(net.minecraft.server.MinecraftServer server, StatusFileWriter writer) {
-        java.nio.file.Path request = ModConfig.CONFIG_DIR.resolve("reset.request.json");
-        boolean resetPending = java.nio.file.Files.isRegularFile(request);
-        int playerCount = server.getPlayerCount();
-        String state = resetPending ? "resetting" : playerCount == 0 ? "ready" : "live";
-        writer.write(state, playerCount);
-        return resetPending;
+    /** Queue both snapshot capture and publication on the Minecraft server thread. */
+    private static void writeCurrentStatus(net.minecraft.server.MinecraftServer server, StatusFileWriter writer) {
+        server.execute(() -> writer.write(server::getPlayerCount));
     }
 }
