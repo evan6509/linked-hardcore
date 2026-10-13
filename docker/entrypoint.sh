@@ -27,9 +27,10 @@ TRANSFER_COUNTDOWN_SECONDS="${TRANSFER_COUNTDOWN_SECONDS:-5}"
 VELOCITY_PORT="${VELOCITY_PORT:-25577}"
 
 INSTALL_DIR="${INSTALL_DIR:-/opt/linkedhardcore/server}"
-PROXY_DIR="${PROXY_DIR:-/opt/linkedhardcore/proxy}"
+PROXY_INSTALL_DIR="${PROXY_INSTALL_DIR:-/opt/linkedhardcore/proxy}"
 PLUGIN_JAR="${PLUGIN_JAR:-/opt/linkedhardcore/velocity-plugin-0.1.0.jar}"
 SHARED_DIR="${SHARED_DIR:-/lh}"
+PROXY_DIR="${PROXY_DIR:-$SHARED_DIR/proxy}"
 
 # ---------------------------------------------------------------------------
 # server mode
@@ -50,8 +51,54 @@ wipe_world() {
 
 reset_is_safe() {
     local data_dir="$1"
-    local status_file="$data_dir/config/linkedhardcore/status.json"
-    [ -f "$status_file" ] && jq -e '.state == "resetting" and .playerCount == 0' "$status_file" >/dev/null 2>&1
+    local dir="$data_dir/config/linkedhardcore"
+    [ -f "$dir/status.json" ] && jq -e --arg id "$SERVER_ID" --slurpfile request "$dir/reset.request.json" '
+        .schemaVersion == 2 and .serverId == $id and .state == "resetting" and .playerCount == 0
+        and ($request[0].schemaVersion == 2) and ($request[0].serverId == $id)
+        and (.generationId == $request[0].previousGenerationId)
+        and (.bootId == $request[0].previousBootId)
+        and ((.updatedAt | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) > (now - 5))
+    ' "$dir/status.json" >/dev/null 2>&1
+}
+
+# Called only with the old JVM stopped. Keep the pending expectation until the
+# proxy observes this exact generation in the new JVM's heartbeat.
+complete_world_reset() {
+    local data_dir="$1"
+    local dir="$data_dir/config/linkedhardcore"
+    local request="$dir/reset.request.json"
+    jq -e --arg id "$SERVER_ID" '.schemaVersion == 2 and .serverId == $id
+        and (.requestId | type == "string" and length > 0)
+        and (.previousGenerationId | type == "string" and length > 0)
+        and (.previousBootId | type == "string" and length > 0)
+        and (.requestId != .previousGenerationId)' "$request" >/dev/null
+    local generation
+    generation=$(jq -r '.requestId' "$request")
+    wipe_world "$data_dir"
+    jq -n --arg id "$SERVER_ID" --arg generation "$generation" '{
+        schemaVersion: 2, serverId: $id, generationId: $generation,
+        completedResetId: $generation, used: false
+    }' > "$dir/world-generation.json.tmp"
+    mv "$dir/world-generation.json.tmp" "$dir/world-generation.json"
+    rm -f "$dir/status.json"
+    rm -f "$request"
+}
+
+initialize_world_identity() {
+    local data_dir="$1"
+    local dir="$data_dir/config/linkedhardcore"
+    mkdir -p "$dir"
+    [ ! -e "$dir/world-generation.json" ] || return 0
+    local used=false
+    for d in "${world_dirs[@]}"; do
+        if [ -e "$data_dir/$d" ]; then used=true; fi
+    done
+    local generation
+    generation=$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')
+    jq -n --arg id "$SERVER_ID" --arg generation "$generation" --argjson used "$used" '{
+        schemaVersion: 2, serverId: $id, generationId: $generation, used: $used
+    }' > "$dir/world-generation.json.tmp"
+    mv "$dir/world-generation.json.tmp" "$dir/world-generation.json"
 }
 
 ensure_eula() {
@@ -68,10 +115,13 @@ ensure_eula() {
 ensure_server_properties() {
     local sp="$1/server.properties"
     touch "$sp"
-    sed -i 's/^online-mode=.*/online-mode=false/; s/^server-port=.*/server-port=25565/; s/^level-name=.*/level-name=world/' "$sp"
+    sed 's/^online-mode=.*/online-mode=false/; s/^server-port=.*/server-port=25565/; s/^level-name=.*/level-name=world/; s/^pause-when-empty-seconds=.*/pause-when-empty-seconds=0/' "$sp" > "$sp.tmp"
+    mv "$sp.tmp" "$sp"
     grep -qx 'online-mode=false' "$sp" || printf 'online-mode=false\n' >> "$sp"
     grep -qx 'server-port=25565' "$sp" || printf 'server-port=25565\n' >> "$sp"
     grep -qx 'level-name=world' "$sp" || printf 'level-name=world\n' >> "$sp"
+    # Readiness is refreshed from server ticks; an empty backend must keep ticking.
+    grep -qx 'pause-when-empty-seconds=0' "$sp" || printf 'pause-when-empty-seconds=0\n' >> "$sp"
 }
 
 # config/linkedhardcore/config.json: the mod refuses to start without it. Create
@@ -102,14 +152,14 @@ run_server() {
     # stopped between kill and wipe) must still be honoured before we boot.
     if [ -f "$reset_file" ]; then
         log "reset request present at boot; wiping world before start"
-        wipe_world "$data_dir"
-        rm -f "$reset_file"
+        complete_world_reset "$data_dir"
     fi
 
     # Never boot with a stale status: the proxy's poller must not act on a state
     # from a previous process. The mod rewrites status.json on SERVER_STARTED.
     rm -f "$data_dir/config/linkedhardcore/status.json"
 
+    initialize_world_identity "$data_dir"
     ensure_eula "$data_dir"
     ensure_server_properties "$data_dir"
     ensure_mod_config "$data_dir"
@@ -146,8 +196,7 @@ run_server() {
                 kill -KILL "$server_pid" 2>/dev/null || true
             fi
             wait "$server_pid" 2>/dev/null || true
-            wipe_world "$data_dir"
-            rm -f "$reset_file"
+            complete_world_reset "$data_dir"
             log "world wiped; exiting for restart"
             exit 0
         elif [ -f "$reset_file" ]; then
@@ -167,8 +216,26 @@ run_server() {
 # proxy mode
 # ---------------------------------------------------------------------------
 
-run_proxy() {
+prepare_proxy_storage() {
     mkdir -p "$PROXY_DIR/plugins/linkedhardcore"
+    if [ ! "$PROXY_INSTALL_DIR/velocity.jar" -ef "$PROXY_DIR/velocity.jar" ]; then
+        cp -f "$PROXY_INSTALL_DIR/velocity.jar" "$PROXY_DIR/velocity.jar"
+    fi
+    # Preserve state from the old location when it is still available. For image
+    # recreation, back up the old container's state before removing that container.
+    if [ "$PROXY_INSTALL_DIR" != "$PROXY_DIR" ]; then
+        for state in current-world.json run-timer.json death-counters.json; do
+            local old="$PROXY_INSTALL_DIR/plugins/linkedhardcore/$state"
+            local target="$PROXY_DIR/plugins/linkedhardcore/$state"
+            if [ -f "$old" ] && [ ! -e "$target" ]; then
+                cp -p "$old" "$target"
+            fi
+        done
+    fi
+}
+
+run_proxy() {
+    prepare_proxy_storage
 
     cat > "$PROXY_DIR/velocity.toml" <<EOF
 # Generated by the linked-hardcore entrypoint from environment variables.
@@ -254,6 +321,8 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 case "$MODE" in
     proxy)  run_proxy ;;

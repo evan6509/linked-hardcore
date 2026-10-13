@@ -81,7 +81,8 @@ everyone. Players respawn into play (survival) on arrival at the other server.
 
 ### `RESET_COMPLETE` — opcode `0x03` (mod → proxy)
 
-Sent after a server has finished resetting and reports itself ready again.
+Legacy best-effort hint that asks the proxy to re-read the backend files. It
+contains no generation identity and cannot independently prove reset completion.
 
 ```
 byte[1]   opcode = 0x03
@@ -93,7 +94,7 @@ server state back to `READY` (idempotent).
 
 > Note: this message is best-effort. When a freshly-reset server has zero players
 > there is no live connection carrying our channel, so the message may not arrive.
-> The proxy ALSO polls each backend's `status.json` for `state: "ready"` as the
+> The proxy polls and validates the complete schema-2 reset/world identity as the
 > reliable path (see `RESET_CONTRACT.md`).
 
 ### `ACK` — opcode `0x04` (proxy → mod)

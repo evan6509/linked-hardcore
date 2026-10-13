@@ -13,6 +13,12 @@ import dev.linkedhardcore.velocity.model.ServerStatus;
 import dev.linkedhardcore.velocity.reset.ResetSignaller;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
+import dev.linkedhardcore.velocity.status.BackendFixture;
+import dev.linkedhardcore.velocity.reset.ResetRequest;
+import dev.linkedhardcore.velocity.reset.FileResetSignaller;
+import java.nio.file.Files;
+import com.google.gson.Gson;
 import org.slf4j.LoggerFactory;
 
 import java.nio.file.Path;
@@ -33,6 +39,10 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.ArgumentMatchers.argThat;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class TransferHandlerTest {
 
@@ -49,11 +59,13 @@ class TransferHandlerTest {
     private final AtomicInteger endedRuns = new AtomicInteger();
     private final AtomicInteger newRuns = new AtomicInteger();
 
+    @TempDir Path directory;
+    private PluginConfig config;
     private TransferHandler handler;
     private Map<String, ServerStatus> statuses;
 
     @BeforeEach
-    void setUp() {
+    void setUp() throws Exception {
         ServerInfo alphaInfo = mock(ServerInfo.class);
         ServerInfo betaInfo = mock(ServerInfo.class);
         ServerInfo gammaInfo = mock(ServerInfo.class);
@@ -79,14 +91,18 @@ class TransferHandlerTest {
         when(player.createConnectionRequest(beta)).thenReturn(request);
 
         LinkedHashMap<String, PluginConfig.BackendServer> backends = new LinkedHashMap<>();
-        backends.put("alpha", new PluginConfig.BackendServer("alpha", "logical-a", Path.of("/tmp/a-status.json").toString()));
-        backends.put("beta", new PluginConfig.BackendServer("beta", "logical-b", Path.of("/tmp/b-status.json").toString()));
-        backends.put("gamma", new PluginConfig.BackendServer("gamma", "logical-c", Path.of("/tmp/c-status.json").toString()));
+        backends.put("alpha", new PluginConfig.BackendServer("alpha", "logical-a", directory.resolve("a/config/linkedhardcore/status.json").toString()));
+        backends.put("beta", new PluginConfig.BackendServer("beta", "logical-b", directory.resolve("b/config/linkedhardcore/status.json").toString()));
+        backends.put("gamma", new PluginConfig.BackendServer("gamma", "logical-c", directory.resolve("c/config/linkedhardcore/status.json").toString()));
         statuses = new LinkedHashMap<>();
         statuses.put("alpha", new ServerStatus("alpha", ServerState.LIVE));
         statuses.put("beta", new ServerStatus("beta", ServerState.READY));
         statuses.put("gamma", new ServerStatus("gamma", ServerState.READY));
-        handler = new TransferHandler(proxy, new PluginConfig(backends, 1), statuses, resetSignaller,
+        config = new PluginConfig(backends, 1);
+        BackendFixture.publish(directory.resolve("a/config/linkedhardcore"), "logical-a", "world-a", "boot-a", true, 1, null);
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", false, 0, null);
+        BackendFixture.publish(directory.resolve("c/config/linkedhardcore"), "logical-c", "world-c", "boot-c", false, 0, null);
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller,
             LoggerFactory.getLogger("test"), new DeathCounterState(), ignored -> { },
             endedRuns::incrementAndGet, newRuns::incrementAndGet);
     }
@@ -121,7 +137,8 @@ class TransferHandlerTest {
         alphaPlayers.set(List.of());
         connection.complete(result);
 
-        verify(resetSignaller).signalReset("logical-a");
+        verify(resetSignaller).signalReset(argThat(reset -> reset.serverId().equals("logical-a")
+            && reset.previousGenerationId().equals("world-a") && reset.previousBootId().equals("boot-a")));
         assertEquals(ServerState.RESETTING, statuses.get("alpha").state());
         assertEquals(ServerState.LIVE, statuses.get("beta").state());
         assertEquals(1, newRuns.get());
@@ -154,4 +171,376 @@ class TransferHandlerTest {
         assertEquals(ServerState.TRANSFERRING, statuses.get("beta").state());
         assertEquals(ServerState.READY, statuses.get("gamma").state());
     }
+
+    @Test
+    void resetSchedulingGapCannotPromoteTheOldEmptySnapshot() throws Exception {
+        doAnswer(invocation -> {
+            ResetRequest reset = invocation.getArgument(0);
+            Files.createDirectories(directory.resolve("a/config/linkedhardcore"));
+            Files.writeString(directory.resolve("a/config/linkedhardcore/reset.pending.json"), new Gson().toJson(reset));
+            BackendFixture.publish(directory.resolve("a/config/linkedhardcore"), "logical-a", "world-a", "boot-a", false, 0, null);
+            handler.onServerReady("alpha");
+            assertFalse(statuses.get("alpha").is(ServerState.READY));
+            Files.writeString(directory.resolve("a/config/linkedhardcore/reset.request.json"), new Gson().toJson(reset));
+            return null;
+        }).when(resetSignaller).signalReset(any());
+        completeSuccessfulTransfer();
+        assertFalse(statuses.get("alpha").is(ServerState.READY));
+        handler.onResetComplete("logical-a");
+        assertFalse(statuses.get("alpha").is(ServerState.READY));
+    }
+
+    @Test
+    void usedStandbyIsResetBeforeItCanReceiveANewRun() throws Exception {
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "used-b", "boot-b", true, 0, null);
+        BackendFixture.publish(directory.resolve("c/config/linkedhardcore"), "logical-c", "used-c", "boot-c", true, 0, null);
+        handler.onPlayerDied(source, UUID.randomUUID());
+        verify(resetSignaller).signalReset(argThat(reset -> reset.serverId().equals("logical-b")));
+        handler.onTransferReady(source);
+        verify(player, never()).createConnectionRequest(any());
+    }
+
+    @Test
+    void durableResetSurvivesUnavailableAndProxyRestart() throws Exception {
+        ResetRequest expected = ResetRequest.create("logical-b", "world-b", "boot-b");
+        new FileResetSignaller(config, LoggerFactory.getLogger("test")).signalReset(expected);
+        Files.delete(directory.resolve("b/config/linkedhardcore/reset.request.json"));
+        handler.onServerReady("beta");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+        Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+        handler.onServerReady("beta");
+        assertEquals(ServerState.UNAVAILABLE, statuses.get("beta").state());
+        TransferHandler restarted = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", false, 0, null);
+        restarted.onResetComplete("logical-b");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", expected.requestId(), "new-boot", false, 0, expected.requestId());
+        restarted.onServerReady("beta");
+        assertEquals(ServerState.READY, statuses.get("beta").state());
+        assertFalse(Files.exists(directory.resolve("b/config/linkedhardcore/reset.pending.json")));
+    }
+
+    @Test
+    void oldCompletionOrSameBootCannotSatisfyANewerReset() throws Exception {
+        ResetRequest expected = ResetRequest.create("logical-b", "world-b", "boot-b");
+        new FileResetSignaller(config, LoggerFactory.getLogger("test")).signalReset(expected);
+        Files.delete(directory.resolve("b/config/linkedhardcore/reset.request.json"));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "older-reset", "older-boot", false, 0, "older-reset");
+        handler.onResetComplete("logical-b");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+        Files.deleteIfExists(directory.resolve("b/config/linkedhardcore/reset.request.json"));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", expected.requestId(), "boot-b", false, 0, expected.requestId());
+        handler.onResetComplete("logical-b");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+        assertTrue(Files.exists(directory.resolve("b/config/linkedhardcore/reset.pending.json")));
+    }
+
+    @Test
+    void completionIsRejectedWhileRequestFileStillExists() throws Exception {
+        ResetRequest expected = ResetRequest.create("logical-b", "world-b", "boot-b");
+        new FileResetSignaller(config, LoggerFactory.getLogger("test")).signalReset(expected);
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", expected.requestId(), "new-boot", false, 0, expected.requestId());
+        handler.onServerReady("beta");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+    }
+
+    @Test
+    void reconnectResumesTheCurrentWorldAfterLogoutAndProxyRestart() throws Exception {
+        Path currentWorld = directory.resolve("current-world.json");
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"),
+            new DeathCounterState(), ignored -> { }, () -> { }, () -> { }, currentWorld);
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", true, 0, null);
+        handler.onBackendJoined("beta");
+        alphaPlayers.set(List.of());
+        BackendFixture.publish(directory.resolve("a/config/linkedhardcore"), "logical-a", "world-a", "boot-a", true, 0, null);
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"),
+            new DeathCounterState(), ignored -> { }, () -> { }, () -> { }, currentWorld);
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(ServerState.LIVE, statuses.get("beta").state());
+        verify(resetSignaller, never()).signalReset(any());
+        Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+        assertTrue(handler.initialServer().isEmpty());
+    }
+
+    @Test
+    void backendJoinLatchesUseAgainstALaggingEmptyHeartbeat() {
+        handler.onBackendJoined("beta");
+        handler.onServerReady("beta");
+        assertEquals(ServerState.LIVE, statuses.get("beta").state());
+    }
+
+    @Test
+    void unavailableDestinationIsRecheckedWhenCountdownFinishes() throws Exception {
+        handler.onPlayerDied(source, UUID.randomUUID());
+        Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+        handler.onTransferReady(source);
+        verify(player, never()).createConnectionRequest(any());
+    }
+
+    @Test
+    void transferToBResetAThenReturnToVerifiedNewA() throws Exception {
+        handler = new TransferHandler(proxy, config, statuses, new FileResetSignaller(config, LoggerFactory.getLogger("test")),
+            LoggerFactory.getLogger("test"));
+        Files.createDirectories(directory.resolve("a/world"));
+        Files.writeString(directory.resolve("a/world/previous-run"), "old A world");
+        ConnectionRequestBuilder.Result success = mock(ConnectionRequestBuilder.Result.class);
+        when(success.isSuccessful()).thenReturn(true);
+        when(request.connect()).thenAnswer(ignored -> {
+            alphaPlayers.set(List.of());
+            betaPlayers.set(List.of(player));
+            return CompletableFuture.completedFuture(success);
+        });
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+        assertEquals(ServerState.RESETTING, statuses.get("alpha").state());
+        ResetRequest resetA = new Gson().fromJson(Files.readString(directory.resolve("a/config/linkedhardcore/reset.pending.json")), ResetRequest.class);
+        BackendFixture.publish(directory.resolve("a/config/linkedhardcore"), "logical-a", "world-a", "boot-a", false, 0, null);
+        handler.onResetComplete("logical-a");
+        assertFalse(statuses.get("alpha").is(ServerState.READY));
+        runFixtureExecutor("a", "logical-a");
+        assertFalse(Files.exists(directory.resolve("a/world/previous-run")));
+        BackendFixture.publish(directory.resolve("a/config/linkedhardcore"), "logical-a", resetA.requestId(), "new-boot-a", false, 0, resetA.requestId());
+        handler.onServerReady("alpha");
+        assertEquals(ServerState.READY, statuses.get("alpha").state());
+        assertFalse(Files.exists(directory.resolve("a/config/linkedhardcore/reset.pending.json")));
+
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", true, 1, null);
+        Files.createDirectories(directory.resolve("b/world"));
+        Files.writeString(directory.resolve("b/world/previous-run"), "old B world");
+        ServerConnection sourceB = mock(ServerConnection.class);
+        ServerInfo sourceBInfo = beta.getServerInfo();
+        when(sourceB.getServerInfo()).thenReturn(sourceBInfo);
+        when(player.getCurrentServer()).thenReturn(Optional.of(sourceB));
+        ConnectionRequestBuilder returnRequest = mock(ConnectionRequestBuilder.class);
+        when(player.createConnectionRequest(alpha)).thenReturn(returnRequest);
+        when(returnRequest.connect()).thenAnswer(ignored -> {
+            betaPlayers.set(List.of());
+            alphaPlayers.set(List.of(player));
+            return CompletableFuture.completedFuture(success);
+        });
+        handler.onPlayerDied(sourceB, UUID.randomUUID());
+        handler.onTransferReady(sourceB);
+        verify(player).createConnectionRequest(alpha);
+        assertEquals(ServerState.LIVE, statuses.get("alpha").state());
+        assertEquals(ServerState.RESETTING, statuses.get("beta").state());
+        runFixtureExecutor("b", "logical-b");
+        assertFalse(Files.exists(directory.resolve("b/world/previous-run")));
+    }
+
+    @Test
+    void conflictingDurableExpectationCannotBeRemovedByAnOldCompletion() throws Exception {
+        ResetRequest old = ResetRequest.create("logical-b", "world-b", "boot-b");
+        FileResetSignaller signaller = new FileResetSignaller(config, LoggerFactory.getLogger("test"));
+        signaller.signalReset(old);
+        handler.onServerReady("beta");
+        ResetRequest newer = ResetRequest.create("logical-b", "world-b", "boot-b");
+        signaller.signalReset(newer);
+        Files.delete(directory.resolve("b/config/linkedhardcore/reset.request.json"));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", old.requestId(), "new-boot", false, 0, old.requestId());
+        handler.onResetComplete("logical-b");
+        assertFalse(statuses.get("beta").is(ServerState.READY));
+        ResetRequest retained = new Gson().fromJson(Files.readString(directory.resolve("b/config/linkedhardcore/reset.pending.json")), ResetRequest.class);
+        assertEquals(newer, retained);
+    }
+
+    private void runFixtureExecutor(String directoryName, String logicalId) throws Exception {
+        Path script = Path.of("../docker/entrypoint.sh").toAbsolutePath().normalize();
+        assertTrue(Files.exists(script));
+        Process process = new ProcessBuilder("bash", "-c",
+            "source \"$1\"; SERVER_ID=\"$2\"; complete_world_reset \"$3\"", "fixture", script.toString(),
+            logicalId, directory.resolve(directoryName).toString()).redirectErrorStream(true).start();
+        String output = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8);
+        assertEquals(0, process.waitFor(), output);
+    }
+
+    @Test
+    void everyoneLoggingOutDuringCountdownCanEnterTheFreshNextRun() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        assertEquals(Optional.of(alpha), handler.initialServer());
+        handler.onPlayerDied(source, UUID.randomUUID());
+        alphaPlayers.set(List.of());
+        // The joining player may already exist on the proxy while not on any backend.
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(1, newRuns.get());
+        assertEquals(ServerState.RESETTING, statuses.get("alpha").state());
+        assertFalse(new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class)
+            .has("pendingTransfer"));
+        verify(player, never()).createConnectionRequest(any());
+    }
+
+    @Test
+    void restartDuringWaitingNeverReopensTheEndedWorld() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        UUID deceased = UUID.randomUUID();
+        handler = durableHandler(lifecycle, new DeathCounterState(), new FileResetSignaller(config, LoggerFactory.getLogger("test")));
+        handler.initialServer();
+        Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+        Files.delete(directory.resolve("c/config/linkedhardcore/status.json"));
+        handler.onPlayerDied(source, deceased);
+        alphaPlayers.set(List.of());
+        DeathCounterState restoredCounters = new DeathCounterState();
+        handler = durableHandler(lifecycle, restoredCounters, new FileResetSignaller(config, LoggerFactory.getLogger("test")));
+        assertTrue(handler.initialServer().isEmpty());
+        assertEquals(1, restoredCounters.count(deceased));
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", false, 0, null);
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(1, restoredCounters.count(deceased));
+        assertEquals(1, newRuns.get());
+    }
+
+    @Test
+    void restartDuringCountdownFinishesTheFreshNextRunWithoutAPlayerCarrier() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        handler.onPlayerDied(source, UUID.randomUUID());
+        assertEquals("COUNTDOWN", new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class)
+            .getAsJsonObject("pendingTransfer").get("phase").getAsString());
+        alphaPlayers.set(List.of());
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(1, newRuns.get());
+    }
+
+    @Test
+    void restartDuringConnectionsResumesTheReservedWorldEvenAfterItWasUsed() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        when(request.connect()).thenReturn(new CompletableFuture<>());
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+        alphaPlayers.set(List.of());
+        BackendFixture.publish(directory.resolve("b/config/linkedhardcore"), "logical-b", "world-b", "boot-b", true, 0, null);
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(1, newRuns.get());
+    }
+
+    @Test
+    void resetPublicationFailureDoesNotLoseCommittedSourceCleanupOnRestart() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        org.mockito.Mockito.doThrow(new java.io.IOException("fixture publication failure"))
+            .when(resetSignaller).signalReset(any());
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        completeSuccessfulTransfer();
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals("world-a", saved.getAsJsonObject("resetAfterTransfer").get("alpha").getAsString());
+        handler = durableHandler(lifecycle, new DeathCounterState(), new FileResetSignaller(config, LoggerFactory.getLogger("test")));
+        handler.onServerReady("alpha");
+        assertTrue(Files.exists(directory.resolve("a/config/linkedhardcore/reset.pending.json")));
+        assertEquals(Optional.of(beta), handler.initialServer());
+    }
+
+    @Test
+    void corruptLifecycleCannotSilentlyReopenAnOldRun() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        Files.writeString(lifecycle, "{\"schemaVersion\":1,\"serverName\":\"unknown\",\"generationId\":\"old\"}");
+        assertThrows(IllegalStateException.class, () -> durableHandler(lifecycle, new DeathCounterState(), resetSignaller));
+    }
+
+    @Test
+    void anotherConnectingPlayerIsAdmittedDuringTheFirstArrivalsUseCheckpoint() throws Exception {
+        when(request.connect()).thenReturn(new CompletableFuture<>());
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+        Path metadata = directory.resolve("b/config/linkedhardcore/world-generation.json");
+        var world = new Gson().fromJson(Files.readString(metadata), com.google.gson.JsonObject.class);
+        world.addProperty("used", true);
+        Files.writeString(metadata, world.toString());
+        assertEquals(Optional.of(beta), handler.connectionServer(false, "beta"));
+    }
+
+    @Test
+    void offlineCountdownCanRetargetAFailedDestinationToAnotherPreparedWorld() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        handler.onPlayerDied(source, UUID.randomUUID());
+        Files.delete(directory.resolve("b/config/linkedhardcore/status.json"));
+        alphaPlayers.set(List.of());
+        assertEquals(Optional.of(gamma), handler.initialServer());
+        assertEquals(1, newRuns.get());
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals("gamma", saved.get("serverName").getAsString());
+        assertFalse(saved.has("pendingTransfer"));
+    }
+
+    @Test
+    void upgradingAnEndedFlatCurrentWorldDoesNotResumeThatWorld() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        Files.writeString(lifecycle, "{\"serverName\":\"alpha\",\"generationId\":\"world-a\"}");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.recoverEndedRun(true);
+        alphaPlayers.set(List.of());
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertEquals(1, newRuns.get());
+    }
+
+    @Test
+    void restartInCommitWindowPreservesTheTargetAndRetriesCleanup() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"),
+            new DeathCounterState(), ignored -> { }, () -> { },
+            (java.util.function.Consumer<String>) id -> { throw new IllegalStateException("simulated commit crash"); }, lifecycle);
+        handler.initialServer();
+        completeSuccessfulTransfer(); // The simulated process interruption occurs in the connection completion future.
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals("COMMITTING", saved.getAsJsonObject("pendingTransfer").get("phase").getAsString());
+        assertEquals("beta", saved.get("serverName").getAsString());
+        handler = durableHandler(lifecycle, new DeathCounterState(), new FileResetSignaller(config, LoggerFactory.getLogger("test")));
+        assertEquals(Optional.of(beta), handler.initialServer());
+        ResetRequest reset = new Gson().fromJson(Files.readString(directory.resolve("a/config/linkedhardcore/reset.pending.json")), ResetRequest.class);
+        assertEquals("logical-a", reset.serverId());
+        assertEquals("world-a", reset.previousGenerationId());
+        verify(resetSignaller, never()).signalReset(any());
+    }
+
+    @Test
+    void lateArrivalAtARetiredSourceCannotReplaceTheCommittedCurrentWorld() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        completeSuccessfulTransfer();
+        assertFalse(handler.onBackendJoined("alpha"));
+        var saved = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class);
+        assertEquals("beta", saved.get("serverName").getAsString());
+    }
+
+    @Test
+    void staleEndedTimerFromTheSourceCannotEndTheAlreadyCommittedNewWorld() throws Exception {
+        Path lifecycle = directory.resolve("current-world.json");
+        handler = durableHandler(lifecycle, new DeathCounterState(), resetSignaller);
+        handler.initialServer();
+        completeSuccessfulTransfer();
+        String committedRunId = new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class)
+            .get("runId").getAsString();
+        AtomicReference<String> repairedTimerRunId = new AtomicReference<>();
+        handler = new TransferHandler(proxy, config, statuses, resetSignaller, LoggerFactory.getLogger("test"),
+            new DeathCounterState(), ignored -> { }, () -> { },
+            (java.util.function.Consumer<String>) repairedTimerRunId::set, lifecycle);
+        handler.recoverRunState(true, "old-source-run");
+        assertEquals(committedRunId, repairedTimerRunId.get());
+        assertEquals(Optional.of(beta), handler.initialServer());
+        assertFalse(new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class).has("pendingTransfer"));
+    }
+
+    private TransferHandler durableHandler(Path lifecycle, DeathCounterState counters, ResetSignaller signaller) {
+        return new TransferHandler(proxy, config, statuses, signaller, LoggerFactory.getLogger("test"), counters,
+            ignored -> { }, endedRuns::incrementAndGet, newRuns::incrementAndGet, lifecycle);
+    }
+
+    private void completeSuccessfulTransfer() {
+        ConnectionRequestBuilder.Result result = mock(ConnectionRequestBuilder.Result.class);
+        when(result.isSuccessful()).thenReturn(true);
+        when(request.connect()).thenAnswer(ignored -> {
+            alphaPlayers.set(List.of());
+            return CompletableFuture.completedFuture(result);
+        });
+        handler.onPlayerDied(source, UUID.randomUUID());
+        handler.onTransferReady(source);
+    }
+
 }

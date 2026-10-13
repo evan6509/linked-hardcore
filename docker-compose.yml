@@ -33,6 +33,7 @@ services:
     container_name: lh-proxy
     environment:
       MODE: proxy
+      PROXY_DIR: /lh/proxy
       FORWARDING_SECRET: ${FORWARDING_SECRET:-linkedhardcore-dev-secret-change-me}
       MC_MEMORY: ${MC_MEMORY:-512M}
       VELOCITY_PORT: ${VELOCITY_PORT:-25577}

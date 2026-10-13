@@ -8,6 +8,7 @@ public final class RunTimerState {
     private long elapsedMillis;
     private Long runningSince;
     private boolean ended;
+    private String runId;
 
     public RunTimerState() {
         this(() -> System.nanoTime() / 1_000_000L);
@@ -34,6 +35,15 @@ public final class RunTimerState {
     }
 
     public synchronized void startNewRun(boolean playersOnline) {
+        startNewRun(null, playersOnline);
+    }
+
+    public synchronized void startNewRun(String newRunId, boolean playersOnline) {
+        if (newRunId != null && newRunId.equals(runId)) {
+            setPlayersOnline(playersOnline);
+            return;
+        }
+        runId = newRunId;
         elapsedMillis = 0;
         runningSince = null;
         ended = false;
@@ -47,14 +57,18 @@ public final class RunTimerState {
         }
         elapsedMillis = snapshot.elapsedMillis();
         ended = snapshot.ended();
+        runId = snapshot.runId();
         runningSince = null;
     }
 
     public synchronized Snapshot snapshot() {
         long activeMillis = runningSince == null ? 0 : Math.max(0, clockMillis.getAsLong() - runningSince);
-        return new Snapshot(elapsedMillis + activeMillis, ended);
+        return new Snapshot(elapsedMillis + activeMillis, ended, runId);
     }
 
-    public record Snapshot(long elapsedMillis, boolean ended) {
+    public record Snapshot(long elapsedMillis, boolean ended, String runId) {
+        public Snapshot(long elapsedMillis, boolean ended) {
+            this(elapsedMillis, ended, null);
+        }
     }
 }

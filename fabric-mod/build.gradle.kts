@@ -16,6 +16,7 @@ repositories {
 }
 
 dependencies {
+    testImplementation("org.mockito:mockito-core:5.15.2")
     minecraft("com.mojang:minecraft:${property("minecraft_version")}")
     // NOTE: `implementation`, NOT `modImplementation` — in Loom 1.17's
     // non-obfuscated mode `modImplementation` no longer exists; the example mod

@@ -61,4 +61,19 @@ class RunTimerStateTest {
         clock.addAndGet(1000);
         assertEquals(new RunTimerState.Snapshot(3456, true), state.snapshot());
     }
+    @Test
+    void replayedCommitDoesNotResetTheNewRunTimerAfterProxyRecovery() {
+        state.startNewRun("run-id", true);
+        clock.addAndGet(2345);
+        var saved = state.snapshot();
+        state.restore(saved);
+        clock.addAndGet(1000);
+        state.startNewRun("run-id", true);
+        assertEquals(2345, state.snapshot().elapsedMillis());
+        clock.addAndGet(500);
+        assertEquals(2845, state.snapshot().elapsedMillis());
+        state.startNewRun("different-run", true);
+        assertEquals(0, state.snapshot().elapsedMillis());
+    }
+
 }

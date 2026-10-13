@@ -74,8 +74,12 @@ public final class RunTimer {
     }
 
     public synchronized void startNewRun() {
+        startNewRun(null);
+    }
+
+    public synchronized void startNewRun(String runId) {
         if (!stopped) {
-            state.startNewRun(!onlinePlayers.isEmpty());
+            state.startNewRun(runId, !onlinePlayers.isEmpty());
             saveAndBroadcast();
         }
     }

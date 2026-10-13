@@ -5,6 +5,7 @@ import com.velocitypowered.api.command.CommandMeta;
 import com.velocitypowered.api.event.Subscribe;
 import com.velocitypowered.api.event.proxy.ProxyInitializeEvent;
 import com.velocitypowered.api.event.proxy.ProxyShutdownEvent;
+import com.velocitypowered.api.event.player.ServerPreConnectEvent;
 import com.velocitypowered.api.plugin.Plugin;
 import com.velocitypowered.api.plugin.annotation.DataDirectory;
 import com.velocitypowered.api.proxy.ProxyServer;
@@ -57,6 +58,7 @@ public final class LinkedHardcorePlugin {
     private DeathCounterStore deathCounterStore;
     private DeathCounterState deathCounters;
     private RunTimer runTimer;
+    private volatile boolean routingInitialized;
 
     @Inject
     public LinkedHardcorePlugin(ProxyServer proxy, Logger logger, @DataDirectory Path dataDirectory) {
@@ -97,10 +99,13 @@ public final class LinkedHardcorePlugin {
 
         ResetSignaller resetSignaller = new FileResetSignaller(config, logger);
         this.transferHandler = new TransferHandler(proxy, config, servers, resetSignaller, logger,
-            deathCounters, deathCounterStore::save, runTimer::endRun, runTimer::startNewRun);
+            deathCounters, deathCounterStore::save, runTimer::endRun, (java.util.function.Consumer<String>) runTimer::startNewRun, dataDirectory.resolve("current-world.json"));
+
+        var restoredRun = runState.snapshot();
+        transferHandler.recoverRunState(restoredRun.ended(), restoredRun.runId());
 
         proxy.getEventManager().register(this, new ProxyMessageListener(transferHandler, logger));
-        proxy.getEventManager().register(this, new ServerLifecycleListener(proxy, config, servers, logger, deathCounters));
+        proxy.getEventManager().register(this, new ServerLifecycleListener(transferHandler, deathCounters));
         proxy.getEventManager().register(this, runTimer);
         runTimer.start(this);
 
@@ -109,6 +114,7 @@ public final class LinkedHardcorePlugin {
         // Poll each backend's status.json so transfers only fire once a server is ready.
         this.statusPoller = new StatusPoller(this, proxy, config, servers, transferHandler, logger);
         statusPoller.start();
+        routingInitialized = true;
 
         logger.info("[linkedhardcore] Linked Hardcore initialized. Backends: {}", servers.keySet());
     }
@@ -121,8 +127,15 @@ public final class LinkedHardcorePlugin {
         proxy.getCommandManager().register(meta, new StatusCommand(proxy, config, servers, deathCounters));
     }
 
+    /** A missing/corrupt lifecycle must not fall through to Velocity's default old-world routing. */
+    @Subscribe
+    public void onServerPreConnect(ServerPreConnectEvent event) {
+        if (!routingInitialized) event.setResult(ServerPreConnectEvent.ServerResult.denied());
+    }
+
     @Subscribe
     public void onProxyShutdown(ProxyShutdownEvent event) {
+        routingInitialized = false;
         if (statusPoller != null) {
             statusPoller.stop();
         }
