@@ -52,6 +52,17 @@ registered carrier. WAIT/PREPARE respawns a dead player through Minecraft's vani
 `PERFORM_RESPAWN` handler, then spectates the replacement entity. Iteration uses a
 snapshot because respawn replaces the player in the server's player list.
 
+## Backend death-report recovery
+
+The backend's `config/linkedhardcore/death-outbox.json` survives ordinary restarts
+and executor world replacement. A companion completion latch is saved only after
+its death intent commits. Restart replays that exact UUID/generation report when
+a player connection is available; ACK loss is safe across proxy restart because
+the accepted transfer and counter record were checkpointed before ACK. Retired
+backend reports are quarantined, and unscoped legacy wire deaths are refused.
+See [protocol durability and upgrade rules](PROTOCOL.md#failure-model-and-upgrade),
+including process-crash versus power-loss limits and legacy Manhunt latch recovery.
+
 ## Container persistence and upgrade
 
 The default proxy runtime directory is now `/lh/proxy`, inside the named volume.

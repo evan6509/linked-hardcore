@@ -50,15 +50,17 @@ All integers are big-endian.
 
 ### `PLAYER_DIED` — opcode `0x01` (mod → proxy)
 
-Sent when any player dies on this server.
-This legacy frame remains readable; updated mods send `WORLD_PLAYER_DIED` below.
+Legacy unscoped death. The decoder still recognizes this layout, but the proxy
+message listener refuses it without ACK, counting, transfer, or reset. A delayed
+frame cannot prove which world ended. Update old senders; current mods send
+`WORLD_PLAYER_DIED` below.
 
 ```
 byte[1]   opcode = 0x01
 byte[16]  playerUuid (the player who died)
 ```
 
-Proxy behaviour (`TransferHandler#onPlayerDied`):
+Proxy behaviour for **world-scoped** deaths (`TransferHandler#onPlayerDied`):
 1. Checkpoints the ended world, pending transfer, and accepted death before replying `ACK`.
    A rejected checkpoint or missing world identity receives no ACK and can be retried.
 2. Records the proxy-authoritative death total and broadcasts `DEATH_COUNTERS`. The
@@ -137,8 +139,10 @@ varint    generationId UTF-8 byte length
 byte[]    generationId UTF-8 bytes
 ```
 
-Only an ACK matching both the pending player's UUID and generation clears a
-world-scoped death. A legacy `ACK` cannot clear a world-scoped event.
+Only an ACK matching both the pending player's UUID and generation, with that
+generation still current on the receiving backend, removes a durable event.
+Removal itself is atomic and precedes forgetting it. A legacy `ACK` cannot clear
+a world-scoped event; an ACK for a retired generation cannot clear anything.
 
 ### `TRANSFER_READY` — opcode `0x05` (mod → proxy)
 
@@ -202,14 +206,60 @@ transfers do not reset the timer.
 `ServerPlayNetworking#send` does **not** verify the receiving side registered the
 channel — a misconfigured channel fails silently. To avoid a silent black hole:
 
-- The mod retains each `WORLD_PLAYER_DIED` frame, its generation, and last send time.
-- On a matching `WORLD_ACK` it clears the entry and logs the round-trip time.
-- On each server tick (`ServerTickEvents.END_SERVER_TICK`) entries older than
-  `ackTimeoutSeconds` (default 10, configurable) are retried with the same identity
-  and bytes. A currently connected player carries the retry, including after the
-  original player respawns or disconnects. If no carrier exists, the entry remains
-  pending until one is available. This queue is in memory for the backend JVM's
-  lifetime; it does not survive a backend restart before proxy acceptance.
+- Before sending, the mod atomically commits the deceased UUID and generation to
+  `config/linkedhardcore/death-outbox.json`, outside resettable worlds. Schema 1
+  records `protocolVersion: 3`, `serverId`, and a `deaths` list of
+  `{playerUuid, generationId}`. The event identity is `(backend, generation, player)`;
+  encoding it again produces exactly the same `0x09` bytes. A world generation has
+  one linked-run termination, so repeated reports for a player in that world are
+  the same event, rather than separate deaths to count.
+- `LinkedHardcoreMod.preparePlayerDeath(UUID)` is the companion API. It returns the
+  committed generation without sending. Manhunt calls it **before** saving its
+  completed runner and transfer latch, in either death-listener order. The normal
+  sender uses the same idempotent preparation, including ordinary non-Manhunt deaths.
+- The outbox is validated on construction and read as the authoritative queue.
+  A fresh messenger after JVM restart immediately retries pending current-generation
+  reports over a current player connection. The deceased player's replacement is
+  preferred, but any connected player on that backend may carry the original frame.
+  With no carrier, nothing is removed or marked sent; reconnect enables retry.
+- After a send, tick retries wait `ackTimeoutSeconds` (default 10). Only send times
+  are volatile. A matching `WORLD_ACK` atomically removes the entry; restart during
+  removal leaves either the event to retry or its committed removal.
+- Proxy acceptance checkpoints source generations and the absolute accepted death
+  count in `current-world.json` before ACK or transfer. Pending-source replays ACK
+  without recounting; recovery restores that absolute count, including when the
+  separate counter save failed. Commit retains the journal until the count is saved.
+  After commit, source cleanup/reset expectations or a different on-disk generation
+  reject/ACK retired reports without ending the destination's run.
+- Reports for retired generations remain quarantined in the backend journal and
+  are never sent into the replacement world. Do not delete journals to force a reset.
+  Invalid schema, missing identity, a foreign server ID, or persistence failure
+  fails closed. The journal is limited to 1 MiB; refusing an additional intent
+  preserves all committed entries and prevents its caller's completion latch/send.
+  Unpublished temporary files are never used as recovery input.
+
+### Failure model and upgrade
+
+The guarantee covers backend/proxy **process crashes**, lost/duplicate plugin
+messages, and ordinary restarts with completed file replacements retained. It
+assumes one JVM owns each backend directory, matching world-generation metadata,
+and local filesystems with atomic replacement. The outbox refuses non-atomic
+replacement. File writes close before rename; neither this outbox nor the existing
+proxy lifecycle/counter stores provides an end-to-end file+directory fsync
+protocol. **Power loss, disk corruption, independent/partial backup rollback,
+manual journal removal, and resetting a running world are outside this guarantee.**
+
+Update Manhunt, the companion on every backend, and the proxy together. Scoped
+v2 frames/ACKs retain their byte layout and remain interoperable; v1 unscoped
+reports are deliberately refused in v3. Old in-memory backend queues cannot be
+recovered after they have already vanished. Drain outstanding work with the old
+versions before upgrading. An old Manhunt runner-death latch without
+`linked_death_generation` does not prove whether the report was lost or ACKed:
+new Manhunt rejects startup, preserving the world for explicit operator
+reconciliation of its completion and proxy lifecycle/counter journals. Never
+invent a generation, clear the latch, or relabel the source fresh. Old standalone
+saves without a pending linked runner death remain readable. A proxy lifecycle
+missing source-generation identities is also rejected by its existing loader.
 
 A single ack round-trip therefore proves **both** directions are healthy:
 - mod→proxy (payload registered in `clientboundPlay`; channel in proxy `ChannelRegistrar`)
@@ -221,5 +271,7 @@ Opcodes are stable and must never be reused for a different message. If the
 protocol changes incompatibly, bump a `PROTOCOL_VERSION` constant on both sides
 and document it here.
 
-`PROTOCOL_VERSION` is now 2. Legacy opcodes remain readable. Upgrade the proxy and
-all backend mods together to enable world-scoped death retry and acknowledgement.
+`PROTOCOL_VERSION` is now 3 on both sides: durable outbox/ACK semantics and refusal
+of unsafe unscoped reports. No opcode was reused or added; `0x09`/`0x0a` keep the
+v2 byte layout. The local outbox schema starts at 1. The companion preparation
+API and Manhunt's generation proof must be installed together as described above.

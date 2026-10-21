@@ -24,8 +24,13 @@ a failed transfer leaves the final time frozen.
 
 The proxy saves the timer in `plugins/linkedhardcore/run-timer.json`, outside the
 resettable worlds. Ordinary server/proxy restarts preserve the elapsed time and
-exclude downtime; active play is checkpointed every second. Pending death transfers
-are checkpointed with their world identities and recover after a proxy restart.
+exclude downtime; active play is checkpointed every second. Backend death reports
+are saved in `config/linkedhardcore/death-outbox.json`
+before send and recover after a JVM restart, waiting for a connected carrier when
+necessary. Matching world-scoped ACKs clear them; retries do not recount an accepted
+death. Upgrade the proxy and every backend together; unscoped legacy reports are
+refused. See the [durability and upgrade contract](docs/PROTOCOL.md#failure-model-and-upgrade).
+Pending death transfers are checkpointed with their world identities and recover after a proxy restart.
 When everyone disconnects, the proxy completes the handoff to a prepared new world
 without requiring a player-carried countdown message. Install the updated
 proxy plugin and Fabric mod on all backends to enable the display. When first

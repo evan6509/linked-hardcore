@@ -7,6 +7,7 @@ resettable world directories.
 
 | File | Owner | Purpose |
 |------|-------|---------|
+| `death-outbox.json` | Fabric | Durable death intents/ACK removals; preserve across boot and reset |
 | `world-generation.json` | Executor creates; Fabric records use | Persistent world identity and first-use latch |
 | `status.json` | Fabric | Fresh heartbeat, real player count, boot and world identities |
 | `reset.pending.json` | Proxy | Durable expected reset, retained until verified completion |
@@ -112,7 +113,8 @@ requests never qualify. The executor still requires an exact boot match.
    previous generation and boot identities. Never wipe a running occupied world.
 2. Stop the JVM and wait for it to exit.
 3. Delete `world/`, `world_nether/`, `world_the_end/`, `playerdata/`, `stats/`, and
-   `advancements/`. Preserve `config/linkedhardcore/` and the proxy's persisted state.
+   `advancements/`. Preserve `config/linkedhardcore/`, including `death-outbox.json`,
+   and the proxy's persisted state. Retired death reports remain quarantined by generation.
 4. Atomically write `world-generation.json` with `used: false` and both identity
    fields equal to the request ID. Remove the previous `status.json`, then remove
    `reset.request.json`. **Retain `reset.pending.json`.**
@@ -162,8 +164,9 @@ python3 scripts/reset_smoke.py --runtime /path/to/cached/fabric-install
 ```
 
 The smoke test checks ordinary restart preservation, heartbeat freshness after
-65 empty seconds, the actual executor wipe, sentinel removal, a new boot/generation,
-and a changed Minecraft-generated seed. It models prior world use with the JVM
-stopped. Unit tests cover player-arrival use persistence, A-to-B-to-new-A routing,
+65 empty seconds, a killed disposable JVM and recovery with a pending death/no
+carrier, outbox preservation through the actual executor wipe, sentinel removal,
+a new boot/generation, and a changed Minecraft-generated seed. It models prior
+world use with the JVM stopped. Unit tests cover player-arrival use persistence, A-to-B-to-new-A routing,
 pending-reset races, stale completion, reconnect routing, and concurrent writes.
 These checks do not substitute for an in-game player transfer test.
