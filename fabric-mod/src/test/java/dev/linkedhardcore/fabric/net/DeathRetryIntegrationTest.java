@@ -119,7 +119,7 @@ class DeathRetryIntegrationTest {
         when(deceased.getUUID()).thenReturn(playerId);
         when(deceased.getName()).thenReturn(Component.literal("deceased"));
         AtomicLong clock = new AtomicLong();
-        ProxyMessenger sender = new ProxyMessenger(modConfig, () -> "world-alpha", clock::get);
+        ProxyMessenger sender = new ProxyMessenger(modConfig, () -> "world-alpha", clock::get, directory.resolve("outbox.json"));
         MinecraftServer server = mock(MinecraftServer.class);
         PlayerList playerList = mock(PlayerList.class);
         when(server.getPlayerList()).thenReturn(playerList);
@@ -151,11 +151,22 @@ class DeathRetryIntegrationTest {
                 Files.delete(lifecycle);
                 Files.writeString(lifecycle, previous);
             }
+            sender = new ProxyMessenger(modConfig, () -> "world-alpha", clock::get, directory.resolve("outbox.json"));
             clock.set(10_001);
             sender.checkPendingAcks(server);
             assertEquals(1, counters.count(playerId));
             verify(source).sendPluginMessage(any(), any(byte[].class));
-            // Lose the ACK and retry before handoff: the accepted death remains unique.
+            // Lose the ACK, discard the backend sender, and optionally restart the
+            // proxy before redelivery. Acceptance and counters must recover together.
+            sender = new ProxyMessenger(modConfig, () -> "world-alpha", clock::get, directory.resolve("outbox.json"));
+            if (restart) {
+                counters = new DeathCounterState();
+                store.loadInto(counters);
+                handler = new TransferHandler(proxy, config, statuses, ignored -> { }, logger,
+                    counters, store::save, () -> { }, newRuns::incrementAndGet, lifecycle);
+                receiver.set(new ProxyMessageListener(handler, logger));
+                handler.onServerReady("beta");
+            }
             clock.set(20_002);
             sender.checkPendingAcks(server);
             assertEquals(1, counters.count(playerId));
@@ -178,11 +189,25 @@ class DeathRetryIntegrationTest {
                 receiver.set(new ProxyMessageListener(handler, logger));
             }
             // A frame already in flight may arrive after commit, including after a proxy restart.
+            String committedLifecycle = Files.readString(lifecycle);
             receiver.get().onPluginMessage(new PluginMessageEvent(source, player,
                 dev.linkedhardcore.velocity.net.Protocol.CHANNEL, lastFrame.get()));
             assertEquals(1, counters.count(playerId));
+            assertEquals(committedLifecycle, Files.readString(lifecycle), "A stale report must not change the newer world's journal");
             assertFalse(new Gson().fromJson(Files.readString(lifecycle), com.google.gson.JsonObject.class)
                 .has("pendingTransfer"));
+            var acknowledgements = org.mockito.ArgumentCaptor.forClass(byte[].class);
+            verify(source, atLeast(2)).sendPluginMessage(any(), acknowledgements.capture());
+            byte[] expectedAck = dev.linkedhardcore.velocity.net.Protocol.encodeAck(playerId, "world-alpha");
+            assertTrue(acknowledgements.getAllValues().stream().allMatch(frame -> java.util.Arrays.equals(expectedAck, frame)));
+            sender.handleInbound(server, expectedAck);
+            assertTrue(new DeathOutbox(directory.resolve("outbox.json"), "alpha").pending().isEmpty());
+            sender = new ProxyMessenger(modConfig, () -> "world-alpha", clock::get, directory.resolve("outbox.json"));
+            byte[] before = lastFrame.get();
+            clock.set(99_999);
+            sender.checkPendingAcks(server);
+            assertSame(before, lastFrame.get(), "An ACKed event must stay cleared after backend restart");
+            assertEquals(1, newRuns.get(), "Redelivery must not start a second transfer");
         }
     }
 

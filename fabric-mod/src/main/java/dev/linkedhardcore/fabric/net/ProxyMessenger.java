@@ -12,6 +12,7 @@ import net.minecraft.server.level.ServerPlayer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -44,17 +45,23 @@ public final class ProxyMessenger implements TransferReadyNotifier {
     private final ModConfig config;
     private final Supplier<String> generationId;
     private final LongSupplier clock;
-    private final Map<UUID, PendingDeath> pendingAcks = new ConcurrentHashMap<>();
+    private final DeathOutbox outbox;
+    private final Map<DeathOutbox.Death, Long> lastSent = new ConcurrentHashMap<>();
     private volatile TransferCountdown transferCountdown;
 
     public ProxyMessenger(ModConfig config, Supplier<String> generationId) {
-        this(config, generationId, System::currentTimeMillis);
+        this(config, generationId, System::currentTimeMillis, ModConfig.CONFIG_DIR.resolve("death-outbox.json"));
     }
 
     ProxyMessenger(ModConfig config, Supplier<String> generationId, LongSupplier clock) {
+        this(config, generationId, clock, ModConfig.CONFIG_DIR.resolve("death-outbox.json"));
+    }
+
+    public ProxyMessenger(ModConfig config, Supplier<String> generationId, LongSupplier clock, Path outboxFile) {
         this.config = config;
         this.generationId = generationId;
         this.clock = clock;
+        this.outbox = new DeathOutbox(outboxFile, config.serverId());
     }
 
     /**
@@ -87,11 +94,24 @@ public final class ProxyMessenger implements TransferReadyNotifier {
      * ACK entry is our failure detector.
      */
     public void sendPlayerDied(ServerPlayer player) {
-        String generation = generationId.get();
-        byte[] frame = Protocol.encodePlayerDied(player.getUUID(), generation);
-        pendingAcks.put(player.getUUID(), new PendingDeath(generation, frame, clock.getAsLong()));
-        ServerPlayNetworking.send(player, new LinkedHardcorePayload(frame));
+        DeathOutbox.Death death = preparePlayerDeath(player.getUUID());
+        sendDeath(player, death);
         LOGGER.info("[linkedhardcore] PLAYER_DIED sent for {}", player.getName().getString());
+    }
+
+    /** Companion API: commit the exact report before persisting its completion latch. No send. */
+    public DeathOutbox.Death preparePlayerDeath(UUID player) {
+        return outbox.prepare(player, generationId.get());
+    }
+
+    public String currentGenerationId() {
+        return generationId.get();
+    }
+
+    private void sendDeath(ServerPlayer carrier, DeathOutbox.Death death) {
+        lastSent.put(death, clock.getAsLong());
+        ServerPlayNetworking.send(carrier, new LinkedHardcorePayload(
+            Protocol.encodePlayerDied(death.playerUuid(), death.generationId())));
     }
 
     /**
@@ -136,27 +156,31 @@ public final class ProxyMessenger implements TransferReadyNotifier {
     public void checkPendingAcks(MinecraftServer server) {
         long now = clock.getAsLong();
         long timeout = config.ackTimeoutSeconds() * 1000L;
-        for (Map.Entry<UUID, PendingDeath> entry : pendingAcks.entrySet()) {
-            PendingDeath death = entry.getValue();
-            if (now - death.sentAt() > timeout) {
-                if (!pendingAcks.replace(entry.getKey(), death, new PendingDeath(death.generationId(), death.frame(), now))) continue;
-                var players = server.getPlayerList().getPlayers();
-                ServerPlayer carrier = players.stream().filter(player -> entry.getKey().equals(player.getUUID()))
-                    .findFirst().orElse(players.isEmpty() ? null : players.getFirst());
-                LOGGER.warn("[linkedhardcore] Death for {} in world '{}' remains unacknowledged; {}",
-                    entry.getKey(), death.generationId(), carrier == null ? "waiting for a connected carrier" : "retrying");
-                if (carrier != null) ServerPlayNetworking.send(carrier, new LinkedHardcorePayload(death.frame()));
-            }
+        String currentGeneration = generationId.get();
+        var pending = outbox.pending();
+        lastSent.keySet().retainAll(pending);
+        for (DeathOutbox.Death death : pending) {
+            // Reset metadata and outbox are outside the world. Keep a retired
+            // generation quarantined; never replay it into its replacement world.
+            if (!death.generationId().equals(currentGeneration)) continue;
+            Long sentAt = lastSent.get(death);
+            if (sentAt != null && now - sentAt <= timeout) continue;
+            var players = server.getPlayerList().getPlayers();
+            ServerPlayer carrier = players.stream().filter(player -> death.playerUuid().equals(player.getUUID()))
+                .findFirst().orElse(players.isEmpty() ? null : players.getFirst());
+            if (carrier != null) sendDeath(carrier, death);
+            // With no carrier, leave both the durable event and immediate retry eligibility intact.
         }
     }
 
     void handleInbound(MinecraftServer server, byte[] data) {
         Protocol.Inbound msg = Protocol.decode(data);
         if (msg.isAck() && msg.playerUuid() != null) {
-            PendingDeath death = pendingAcks.get(msg.playerUuid());
-            if (death != null && death.generationId().equals(msg.generationId()) && pendingAcks.remove(msg.playerUuid(), death)) {
-                long rtt = clock.getAsLong() - death.sentAt();
-                LOGGER.info("[linkedhardcore] ACK received for {} (round-trip {}ms)", msg.playerUuid(), rtt);
+            // A legacy ACK or an ACK for a retired world cannot clear an event.
+            if (generationId.get().equals(msg.generationId())
+                && outbox.acknowledge(msg.playerUuid(), msg.generationId())) {
+                lastSent.remove(new DeathOutbox.Death(msg.playerUuid(), msg.generationId()));
+                LOGGER.info("[linkedhardcore] Durable ACK received for {} in {}", msg.playerUuid(), msg.generationId());
             }
             return;
         }
@@ -182,5 +206,4 @@ public final class ProxyMessenger implements TransferReadyNotifier {
         LOGGER.warn("[linkedhardcore] Dropped unrecognized proxy message: opcode=0x{}", Integer.toHexString(msg.opcode()));
     }
 
-    private record PendingDeath(String generationId, byte[] frame, long sentAt) { }
 }

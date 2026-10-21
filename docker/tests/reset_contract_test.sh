@@ -14,9 +14,13 @@ jq -e '.used == false and .schemaVersion == 2' "$dir/world-generation.json" >/de
 first=$(jq -r '.generationId' "$dir/world-generation.json")
 mkdir -p "$data/world"
 printf 'old world sentinel\n' > "$data/world/sentinel"
+jq -n --arg generation "$first" '{schemaVersion:1, protocolVersion:3, serverId:"a",
+    deaths:[{playerUuid:"12345678-1234-5678-9abc-def012345678", generationId:$generation}]}' > "$dir/death-outbox.json"
+cp "$dir/death-outbox.json" "$fixture/committed-death.json"
 initialize_world_identity "$data"
 [ "$(jq -r '.generationId' "$dir/world-generation.json")" = "$first" ]
 [ -f "$data/world/sentinel" ]
+cmp "$fixture/committed-death.json" "$dir/death-outbox.json"
 
 printf 'pause-when-empty-seconds=60\nlevel-seed=\n' > "$data/server.properties"
 ensure_server_properties "$data"
@@ -44,6 +48,8 @@ complete_world_reset "$data"
 [ ! -e "$dir/status.json" ]
 [ ! -e "$dir/reset.request.json" ]
 [ -e "$dir/reset.pending.json" ]
+# Even an unacknowledged old-world report survives replacement for quarantine.
+cmp "$fixture/committed-death.json" "$dir/death-outbox.json"
 jq -e '.generationId == "next-generation" and .completedResetId == "next-generation" and .used == false' "$dir/world-generation.json" >/dev/null
 
 # Legacy existing worlds must remain resumable through an ordinary boot.

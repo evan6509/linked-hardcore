@@ -889,4 +889,18 @@ class TransferHandlerTest {
         handler.onTransferReady(source);
     }
 
+    @Test
+    void legacyUnscopedWireDeathCannotAuthorizeAReset() {
+        var listener = new dev.linkedhardcore.velocity.net.ProxyMessageListener(handler, LoggerFactory.getLogger("test"));
+        UUID deceased = UUID.randomUUID();
+        byte[] legacy = java.nio.ByteBuffer.allocate(17).put(Protocol.OP_PLAYER_DIED)
+            .putLong(deceased.getMostSignificantBits()).putLong(deceased.getLeastSignificantBits()).array();
+        listener.onPluginMessage(new com.velocitypowered.api.event.connection.PluginMessageEvent(
+            source, player, Protocol.CHANNEL, legacy));
+        assertEquals(0, endedRuns.get(), "An unscoped replay cannot identify the world it would retire");
+        verify(source, never()).sendPluginMessage(any(), any(byte[].class));
+        verify(alpha, never()).sendPluginMessage(any(), any(byte[].class));
+        org.mockito.Mockito.verifyNoInteractions(resetSignaller);
+    }
+
 }

@@ -20,10 +20,11 @@ import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
-import static org.junit.jupiter.api.Assertions.assertArrayEquals;
+import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class ProxyMessengerTest {
+    @TempDir Path directory;
     @BeforeAll
     static void initializeMinecraft(@TempDir Path configDirectory) throws Exception {
         try (var loader = mockStatic(FabricLoader.class)) {
@@ -122,8 +123,81 @@ class ProxyMessengerTest {
         }
     }
 
-    private static ProxyMessenger messenger(AtomicLong clock) {
-        return new ProxyMessenger(new ModConfig("a", 10, 5), () -> "world-a", clock::get);
+    @Test
+    void preparedDeathSurvivesCrashBeforeFirstSendAndWaitsForReconnect() {
+        AtomicLong clock = new AtomicLong();
+        UUID deceased = UUID.randomUUID();
+        ProxyMessenger original = messenger(clock);
+        MinecraftServer server = server();
+        ServerPlayer carrier = player(UUID.randomUUID());
+        try (var networking = mockStatic(ServerPlayNetworking.class)) {
+            original.preparePlayerDeath(deceased); // No send has occurred at this crash point.
+            ProxyMessenger restarted = messenger(clock);
+            restarted.checkPendingAcks(server);
+            networking.verifyNoInteractions();
+            when(server.getPlayerList().getPlayers()).thenReturn(List.of(carrier));
+            restarted.checkPendingAcks(server); // Reconnect need not wait for a new death callback.
+            networking.verify(() -> ServerPlayNetworking.send(eq(carrier), argThat((LinkedHardcorePayload payload) ->
+                java.util.Arrays.equals(Protocol.encodePlayerDied(deceased, "world-a"), payload.data()))));
+        }
+    }
+
+    @Test
+    void ordinaryDeathAndMatchingAckRemainDurableAcrossRestarts() {
+        AtomicLong clock = new AtomicLong();
+        ServerPlayer player = player(UUID.randomUUID());
+        MinecraftServer server = server(player);
+        try (var networking = mockStatic(ServerPlayNetworking.class)) {
+            messenger(clock).sendPlayerDied(player);
+            ProxyMessenger restarted = messenger(clock);
+            restarted.handleInbound(server, ack(player.getUUID(), "wrong-world"));
+            restarted.handleInbound(server, ack(UUID.randomUUID(), "world-a"));
+            restarted.handleInbound(server, dev.linkedhardcore.velocity.net.Protocol.encodeAck(player.getUUID()));
+            restarted = messenger(clock); // A mismatched ACK must not alter disk either.
+            restarted.checkPendingAcks(server);
+            networking.verify(() -> ServerPlayNetworking.send(eq(player), any(LinkedHardcorePayload.class)), times(2));
+            restarted.handleInbound(server, ack(player.getUUID(), "world-a"));
+            clock.set(99_999);
+            messenger(clock).checkPendingAcks(server);
+            networking.verify(() -> ServerPlayNetworking.send(eq(player), any(LinkedHardcorePayload.class)), times(2));
+        }
+    }
+
+    @Test
+    void retiredGenerationIsQuarantinedAndCannotClearANewerDeath() {
+        AtomicLong clock = new AtomicLong();
+        ServerPlayer player = player(UUID.randomUUID());
+        MinecraftServer server = server(player);
+        messenger(clock).preparePlayerDeath(player.getUUID());
+        ProxyMessenger nextWorld = new ProxyMessenger(new ModConfig("a", 10, 5), () -> "world-b",
+            clock::get, directory.resolve("outbox.json"));
+        try (var networking = mockStatic(ServerPlayNetworking.class)) {
+            nextWorld.checkPendingAcks(server);
+            nextWorld.handleInbound(server, ack(player.getUUID(), "world-a"));
+            networking.verifyNoInteractions();
+            nextWorld.sendPlayerDied(player);
+            nextWorld.handleInbound(server, ack(player.getUUID(), "world-a"));
+            clock.set(10_001);
+            nextWorld.checkPendingAcks(server);
+            networking.verify(() -> ServerPlayNetworking.send(eq(player), argThat((LinkedHardcorePayload payload) ->
+                java.util.Arrays.equals(Protocol.encodePlayerDied(player.getUUID(), "world-b"), payload.data()))), times(2));
+            assertEquals(2, new DeathOutbox(directory.resolve("outbox.json"), "a").pending().size());
+        }
+    }
+
+    @Test
+    void failedPrepareDoesNotPermitFirstSend() throws Exception {
+        ProxyMessenger sender = messenger(new AtomicLong());
+        java.nio.file.Files.createDirectory(directory.resolve("outbox.json"));
+        java.nio.file.Files.writeString(directory.resolve("outbox.json/blocker"), "fixture");
+        try (var networking = mockStatic(ServerPlayNetworking.class)) {
+            assertThrows(IllegalStateException.class, () -> sender.sendPlayerDied(player(UUID.randomUUID())));
+            networking.verifyNoInteractions();
+        }
+    }
+
+    private ProxyMessenger messenger(AtomicLong clock) {
+        return new ProxyMessenger(new ModConfig("a", 10, 5), () -> "world-a", clock::get, directory.resolve("outbox.json"));
     }
 
     private static ServerPlayer player(UUID uuid) {

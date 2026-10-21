@@ -67,7 +67,7 @@ import java.util.UUID;
 public final class Protocol {
 
     public static final String CHANNEL_NAME = "linkedhardcore:main";
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 3;
     public static final ChannelIdentifier CHANNEL = MinecraftChannelIdentifier.from(CHANNEL_NAME);
 
     public static final byte OP_PLAYER_DIED = 0x01;

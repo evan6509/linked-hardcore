@@ -53,6 +53,10 @@ public final class ProxyMessageListener {
 
         Protocol.Inbound msg = decoded.get();
         if (msg.isPlayerDied()) {
+            if (msg.generationId() == null) {
+                logger.error("[linkedhardcore] Refusing unscoped legacy death from '{}'; upgrade the backend mod", source.getServerInfo().getName());
+                return;
+            }
             transferHandler.onPlayerDied(source, msg.playerUuid(), msg.generationId());
         } else if (msg.isTransferReady()) {
             transferHandler.onTransferReady(source);

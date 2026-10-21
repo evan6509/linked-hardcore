@@ -44,6 +44,7 @@ class Backend:
         self.directory, self.reports = directory, reports
         self.process = self.log = None
         self.boots = 0
+        self.last_boot = None
 
     def start(self, expected):
         self.boots += 1
@@ -52,9 +53,11 @@ class Backend:
         self.process = subprocess.Popen(["java", "-Xmx768M", "-jar", "server.jar", "nogui"],
                                         cwd=self.directory, stdin=subprocess.PIPE, stdout=self.log,
                                         stderr=subprocess.STDOUT, text=True, env=environment)
-        return self.wait_status(expected)
+        status = self.wait_status(expected, previous_boot=self.last_boot)
+        self.last_boot = status["bootId"]
+        return status
 
-    def wait_status(self, expected, timeout=90):
+    def wait_status(self, expected, timeout=90, previous_boot=None):
         deadline = time.monotonic() + timeout
         path = self.directory / "config/linkedhardcore/status.json"
         while time.monotonic() < deadline:
@@ -62,12 +65,20 @@ class Backend:
                 raise RuntimeError(f"Server exited: see {self.log.name}")
             try:
                 status = read_json(path)
-                if status["state"] == expected and status["playerCount"] == 0:
+                if (status["state"] == expected and status["playerCount"] == 0
+                        and status["bootId"] != previous_boot):
                     return status
             except (OSError, ValueError, KeyError):
                 pass
             time.sleep(0.25)
         raise TimeoutError(f"No {expected} status: see {self.log.name}")
+
+    def crash(self):
+        """Kill only this disposable fixture JVM; preserve its on-disk state."""
+        self.process.kill()
+        self.process.wait(timeout=10)
+        self.log.close()
+        self.process = self.log = None
 
     def stop(self):
         if self.process is not None and self.process.poll() is None:
@@ -131,6 +142,12 @@ def main():
             world = read_json(metadata / "world-generation.json")
             world["used"] = True  # Isolated fixture models prior play; the JVM is stopped.
             (metadata / "world-generation.json").write_text(json.dumps(world))
+            # Model a committed report with no connected plugin-message carrier.
+            outbox_file = metadata / "death-outbox.json"
+            committed_death = json.dumps({"schemaVersion": 1, "protocolVersion": 3, "serverId": "a",
+                                         "deaths": [{"playerUuid": str(uuid.uuid4()),
+                                                     "generationId": initial["generationId"]}]})
+            outbox_file.write_text(committed_death)
             (metadata / "status.json").unlink()
             print("Restarting the used world; checking idle heartbeat for 65+ seconds.", flush=True)
             resumed = backend.start("live")
@@ -142,7 +159,15 @@ def main():
             assert after["updatedAt"] != before
             assert time.time() - (metadata / "status.json").stat().st_mtime < 5
             assert sentinel.exists() and seed(directory) == old_seed
-            print("Idle heartbeat and ordinary-restart preservation passed; requesting a reset.", flush=True)
+            assert outbox_file.read_text() == committed_death
+            print("Killing the disposable JVM with a pending death and no carrier, then restarting.", flush=True)
+            backend.crash()
+            previous_boot = after["bootId"]
+            after = backend.start("live")
+            assert after["bootId"] != previous_boot and after["generationId"] == initial["generationId"]
+            assert sentinel.exists() and seed(directory) == old_seed
+            assert outbox_file.read_text() == committed_death
+            print("Idle heartbeat, pending outbox, and crash/restart preservation passed; requesting a reset.", flush=True)
             request_id = str(uuid.uuid4())
             request = {"schemaVersion": 2, "serverId": "a", "requestId": request_id,
                        "requestedAt": after["updatedAt"], "previousGenerationId": after["generationId"],
@@ -156,17 +181,20 @@ def main():
             assert not sentinel.exists() and not (metadata / "status.json").exists()
             assert not (metadata / "reset.request.json").exists()
             assert (metadata / "reset.pending.json").exists()
+            assert outbox_file.read_text() == committed_death
             regenerated = backend.start("ready")
             assert regenerated["generationId"] == regenerated["completedResetId"] == request_id
             assert regenerated["bootId"] != resetting["bootId"]
             assert regenerated["worldUsed"] is False
+            assert outbox_file.read_text() == committed_death  # Retired report is quarantined, not discarded.
             backend.stop()
             new_seed = seed(directory)
             assert new_seed != old_seed
             result = {"passed": True, "idleSeconds": args.idle_seconds, "oldSeed": old_seed,
                       "newSeed": new_seed, "oldGeneration": initial["generationId"], "newGeneration": request_id,
                       "ordinaryRestartPreservedWorld": True, "oldSentinelRemoved": True,
-                      "heartbeatStayedFresh": True}
+                      "heartbeatStayedFresh": True, "pendingDeathSurvivedCrashRestart": True,
+                      "pendingDeathSurvivedReset": True}
             (reports / "result.json").write_text(json.dumps(result, indent=2) + "\n")
             print(json.dumps(result, indent=2), flush=True)
         finally:

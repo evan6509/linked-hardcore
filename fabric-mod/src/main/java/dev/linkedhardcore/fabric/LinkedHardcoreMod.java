@@ -33,13 +33,26 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
 
     private static final Logger LOGGER = LoggerFactory.getLogger("linkedhardcore");
 
+    private static ProxyMessenger messenger;
+
+    /** Durable companion seam. Failure must prevent the caller's completion commit. */
+    public static String preparePlayerDeath(java.util.UUID player) {
+        if (messenger == null) throw new IllegalStateException("Linked Hardcore messenger is not initialized");
+        return messenger.preparePlayerDeath(player).generationId();
+    }
+
+    public static String currentDeathGeneration() {
+        if (messenger == null) throw new IllegalStateException("Linked Hardcore messenger is not initialized");
+        return messenger.currentGenerationId();
+    }
+
     @Override
     public void onInitializeServer() {
         ModConfig config = ModConfig.load();
         LOGGER.info("[linkedhardcore] Initializing for server '{}'", config.serverId());
 
         StatusFileWriter statusWriter = new StatusFileWriter(config);
-        ProxyMessenger messenger = new ProxyMessenger(config, statusWriter::generationId);
+        messenger = new ProxyMessenger(config, statusWriter::generationId);
         TransferCountdown transferCountdown = new TransferCountdown(config, messenger);
         messenger.setTransferCountdown(transferCountdown);
 
