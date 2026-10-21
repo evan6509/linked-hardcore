@@ -36,7 +36,7 @@ services:
       PROXY_DIR: /lh/proxy
       FORWARDING_SECRET: ${FORWARDING_SECRET:-linkedhardcore-dev-secret-change-me}
       MC_MEMORY: ${MC_MEMORY:-512M}
-      VELOCITY_PORT: ${VELOCITY_PORT:-25577}
+      VELOCITY_PORT: 25577
     ports:
       - "${VELOCITY_PORT:-25577}:25577"
     volumes:

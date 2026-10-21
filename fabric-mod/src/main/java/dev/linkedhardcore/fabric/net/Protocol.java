@@ -1,6 +1,7 @@
 package dev.linkedhardcore.fabric.net;
 
 import io.netty.buffer.Unpooled;
+import io.netty.handler.codec.DecoderException;
 import net.minecraft.network.FriendlyByteBuf;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.common.custom.CustomPacketPayload;
@@ -63,6 +64,7 @@ import java.util.UUID;
 public final class Protocol {
 
     public static final String CHANNEL_NAME = "linkedhardcore:main";
+    public static final int PROTOCOL_VERSION = 2;
     public static final Identifier CHANNEL = Identifier.fromNamespaceAndPath("linkedhardcore", "main");
 
     public static final byte OP_PLAYER_DIED = 0x01;
@@ -73,6 +75,8 @@ public final class Protocol {
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
     public static final byte OP_DEATH_COUNTERS = 0x07;
     public static final byte OP_RUN_TIMER = 0x08;
+    public static final byte OP_WORLD_PLAYER_DIED = 0x09;
+    public static final byte OP_WORLD_ACK = 0x0a;
 
     private Protocol() {
     }
@@ -85,6 +89,18 @@ public final class Protocol {
         buf.writeByte(OP_PLAYER_DIED);
         buf.writeLong(playerUuid.getMostSignificantBits());
         buf.writeLong(playerUuid.getLeastSignificantBits());
+        return drain(buf);
+    }
+
+    /** Retry identity: the deceased player and the exact ended world generation. */
+    public static byte[] encodePlayerDied(UUID playerUuid, String generationId) {
+        if (generationId == null || generationId.isBlank() || generationId.length() > 32_767) {
+            throw new IllegalArgumentException("Invalid death world generation");
+        }
+        FriendlyByteBuf buf = new FriendlyByteBuf(Unpooled.buffer());
+        buf.writeByte(OP_WORLD_PLAYER_DIED);
+        buf.writeUUID(playerUuid);
+        buf.writeUtf(generationId);
         return drain(buf);
     }
 
@@ -113,7 +129,11 @@ public final class Protocol {
     public record RunTimer(long elapsedMillis, boolean ended) {
     }
 
-    public record Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters, RunTimer runTimer) {
+    public record Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters, RunTimer runTimer,
+                          String generationId) {
+        public Inbound(byte opcode, UUID playerUuid, List<DeathCounter> deathCounters, RunTimer runTimer) {
+            this(opcode, playerUuid, deathCounters, runTimer, null);
+        }
         public boolean isPrepareTransfer() {
             return opcode == OP_PREPARE_TRANSFER;
         }
@@ -123,7 +143,7 @@ public final class Protocol {
         }
 
         public boolean isAck() {
-            return opcode == OP_ACK;
+            return opcode == OP_ACK || opcode == OP_WORLD_ACK;
         }
 
         public boolean isDeathCounters() {
@@ -148,6 +168,13 @@ public final class Protocol {
                 case OP_WAIT_FOR_SERVER -> new Inbound(opcode, null, List.of(), null);
                 case OP_ACK -> buf.readableBytes() == 16
                     ? new Inbound(opcode, buf.readUUID(), List.of(), null) : new Inbound((byte) 0, null, List.of(), null);
+                case OP_WORLD_ACK -> {
+                    UUID player = buf.readUUID();
+                    String generation = buf.readUtf();
+                    yield !generation.isBlank() && buf.readableBytes() == 0
+                        ? new Inbound(opcode, player, List.of(), null, generation)
+                        : new Inbound((byte) 0, null, List.of(), null);
+                }
                 case OP_DEATH_COUNTERS -> {
                     int count = buf.readVarInt();
                     if (count < 0 || count > 10_000) {
@@ -171,7 +198,7 @@ public final class Protocol {
                 }
                 default -> new Inbound(opcode, null, List.of(), null);
             };
-        } catch (IndexOutOfBoundsException | IllegalArgumentException e) {
+        } catch (IndexOutOfBoundsException | IllegalArgumentException | DecoderException e) {
             return new Inbound((byte) 0, null, List.of(), null);
         } finally {
             buf.release();

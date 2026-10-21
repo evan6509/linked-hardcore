@@ -18,6 +18,7 @@ import dev.linkedhardcore.velocity.status.BackendSnapshot;
 import org.slf4j.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -106,12 +107,12 @@ public final class TransferHandler {
         this.onRunEnded = onRunEnded;
         this.onNewRun = onNewRun;
         loadLifecycle();
-        if (pending != null && pending.phase != TransferPhase.COMMITTING) {
+        if (pending != null) {
             if (pending.deathCounter != null) {
                 deathCounters.restore(pending.deathCounter);
-                persistDeathCounters.accept(deathCounters);
+                saveDeathCountersLocked();
             }
-            onRunEnded.run();
+            if (pending.phase != TransferPhase.COMMITTING) onRunEnded.run();
         }
     }
 
@@ -140,6 +141,10 @@ public final class TransferHandler {
 
     /** ACKs a death and starts one serialized transfer for the shared life pool. */
     public void onPlayerDied(ServerConnection source, UUID playerUuid) {
+        onPlayerDied(source, playerUuid, null);
+    }
+
+    public void onPlayerDied(ServerConnection source, UUID playerUuid, String generationId) {
         String fromServerName = source.getServerInfo().getName();
         logger.info("[linkedhardcore] PLAYER_DIED from '{}': player={}", fromServerName, playerUuid);
 
@@ -150,10 +155,25 @@ public final class TransferHandler {
                 return;
             }
             if (pending != null) {
-                source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid));
+                // An arrival can die in the destination while the preceding run is still committing.
+                // Leave that new-world event unacknowledged so it can retry after commit.
+                if (generationId != null && !generationId.equals(pending.sourceGenerations.get(fromServerName))) return;
+                source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid, generationId));
                 logger.info("[linkedhardcore] Ignoring PLAYER_DIED from '{}'; transfer already active for {}",
                     fromServerName, pending.sourceNames);
                 return;
+            }
+            if (generationId != null) {
+                if (retiredGenerationLocked(fromServerName, generationId)) {
+                    source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid, generationId));
+                    return;
+                }
+                BackendSnapshot identity = BackendSnapshot.readIdentity(config.backendServers().get(fromServerName));
+                if (identity == null) return; // A transient identity read failure must leave the event retryable.
+                if (!generationId.equals(identity.generationId())) {
+                    source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid, generationId));
+                    return;
+                }
             }
 
             Set<String> sourceNames = activeBackendServers();
@@ -174,8 +194,10 @@ public final class TransferHandler {
                 }
                 accepted.sourceGenerations.put(name, identity.generationId());
             }
-            Player player = source.getPlayer();
-            String playerName = player == null ? playerUuid.toString() : player.getUsername();
+            Player player = proxy.getPlayer(playerUuid).orElse(null);
+            String playerName = player == null ? deathCounters.snapshot().stream()
+                .filter(record -> record.playerUuid().equals(playerUuid)).map(DeathCounterState.DeathRecord::playerName)
+                .findFirst().orElse(playerUuid.toString()) : player.getUsername();
             accepted.deathCounter = new DeathCounterState.DeathRecord(playerUuid, playerName,
                 deathCounters.count(playerUuid) + 1);
             try {
@@ -187,8 +209,8 @@ public final class TransferHandler {
             }
             pending = accepted;
             deathCounters.restore(accepted.deathCounter);
-            persistDeathCounters.accept(deathCounters);
-            source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid));
+            saveDeathCountersLocked(); // The lifecycle retains this record if the counter store is unavailable.
+            source.sendPluginMessage(Protocol.CHANNEL, Protocol.encodeAck(playerUuid, generationId));
             deathRecorded = true;
             onRunEnded.run();
             attemptTransferLocked();
@@ -197,6 +219,21 @@ public final class TransferHandler {
         if (deathRecorded) {
             broadcastCounters();
         }
+    }
+
+    private boolean retiredGenerationLocked(String name, String generationId) {
+        if (generationId.equals(resetAfterTransfer.get(name))) return true;
+        ResetRequest reset = pendingResets.get(name);
+        if (reset == null) {
+            try {
+                reset = GSON.fromJson(Files.readString(Path.of(config.backendServers().get(name).statusFile())
+                    .resolveSibling("reset.pending.json")), ResetRequest.class);
+            } catch (IOException | com.google.gson.JsonParseException ignored) {
+                return false;
+            }
+        }
+        return reset != null && reset.validFor(config.backendServers().get(name).serverId())
+            && generationId.equals(reset.previousGenerationId());
     }
 
     /**
@@ -232,8 +269,13 @@ public final class TransferHandler {
                 attemptTransferLocked();
                 return;
             }
-            pending.phase = TransferPhase.CONNECTING;
-            checkpointLifecycle(); // Recovery may continue this exact generation even after its first arrival.
+            try {
+                checkpointPhaseLocked(TransferPhase.CONNECTING);
+            } catch (IllegalStateException e) {
+                // The backend's countdown response is one-shot. Polling must replay preparation.
+                pending.phase = TransferPhase.WAITING_FOR_DESTINATION;
+                throw e;
+            }
             transfer = pending;
         }
 
@@ -286,6 +328,9 @@ public final class TransferHandler {
         if (expected != null) {
             if (requestPresent || !snapshot.completes(expected) || !isServerEmpty(name)) {
                 status.tryTransition(ServerState.RESETTING, logger);
+                if (requestPresent && !publishingResets.contains(name)) {
+                    reconcileResetBootLocked(name, expected, snapshot);
+                }
                 // Retry a failed publication with the same identity. Never replace a
                 // newer on-disk request, or interrupt an executor that has acknowledged it.
                 if (!requestPresent && !snapshot.generationId().equals(expected.requestId()) && !publishingResets.contains(name)) {
@@ -358,6 +403,27 @@ public final class TransferHandler {
             logger.error("[linkedhardcore] Failed to publish reset for '{}'; backend remains ineligible", name, e);
         } finally {
             publishingResets.remove(name);
+        }
+    }
+
+    /** Repair a publication racing a restart, without changing the reset or world being retired. */
+    private void reconcileResetBootLocked(String name, ResetRequest expected, BackendSnapshot snapshot) {
+        if (!"resetting".equals(snapshot.state()) || snapshot.playerCount() != 0 || !isServerEmpty(name)
+            || !snapshot.generationId().equals(expected.previousGenerationId())) return;
+        Path dir = Path.of(config.backendServers().get(name).statusFile()).getParent();
+        try {
+            ResetRequest durable = GSON.fromJson(Files.readString(dir.resolve("reset.pending.json")), ResetRequest.class);
+            ResetRequest published = GSON.fromJson(Files.readString(dir.resolve("reset.request.json")), ResetRequest.class);
+            if (!expected.equals(durable) || published == null || !published.validFor(expected.serverId())
+                || !expected.withPreviousBootId(published.previousBootId()).equals(published)) return;
+            ResetRequest rebound = expected.withPreviousBootId(snapshot.bootId());
+            if (expected.equals(rebound) && published.equals(rebound)) return;
+            // Persist first so a failed request write (or proxy restart between writes) can retry the same reset.
+            FileResetSignaller.writeAtomic(dir.resolve("reset.pending.json"), GSON.toJson(rebound));
+            pendingResets.put(name, rebound);
+            if (!published.equals(rebound)) publishResetLocked(name, rebound);
+        } catch (IOException | com.google.gson.JsonParseException e) {
+            logger.warn("[linkedhardcore] Could not reconcile reset boot for '{}'; retaining the reset latch", name, e);
         }
     }
 
@@ -463,6 +529,27 @@ public final class TransferHandler {
         checkpointLifecycle(pending);
     }
 
+    private void checkpointPhaseLocked(TransferPhase next) {
+        TransferPhase previous = pending.phase;
+        pending.phase = next;
+        try {
+            checkpointLifecycle();
+        } catch (IllegalStateException e) {
+            pending.phase = previous;
+            throw e;
+        }
+    }
+
+    private boolean saveDeathCountersLocked() {
+        try {
+            persistDeathCounters.accept(deathCounters);
+            return true;
+        } catch (UncheckedIOException e) {
+            logger.warn("[linkedhardcore] Keeping the accepted death journal until its counter can be saved", e);
+            return false;
+        }
+    }
+
     private void checkpointLifecycle(PendingTransfer transfer) {
         if (currentWorldFile == null) return;
         SavedLifecycle body = new SavedLifecycle(1, currentWorld == null ? null : currentWorld.serverName,
@@ -558,8 +645,7 @@ public final class TransferHandler {
             }
             if (destination != null && destination.prepared()
                 && destination.generationId().equals(pending.destinationGenerationId)) {
-                pending.phase = TransferPhase.CONNECTING;
-                checkpointLifecycle();
+                checkpointPhaseLocked(TransferPhase.CONNECTING);
                 completeTransfer(pending, pending.destinationName, true);
             }
         } else if (pending.phase == TransferPhase.RECOVERING) {
@@ -568,8 +654,7 @@ public final class TransferHandler {
                 && destination.generationId().equals(pending.destinationGenerationId)
                 && !resetFileExists(pending.destinationName, "reset.pending.json")
                 && !resetFileExists(pending.destinationName, "reset.request.json")) {
-                pending.phase = TransferPhase.CONNECTING;
-                checkpointLifecycle();
+                checkpointPhaseLocked(TransferPhase.CONNECTING);
                 completeTransfer(pending, pending.destinationName, true);
             }
         }
@@ -577,6 +662,7 @@ public final class TransferHandler {
 
     private void finishCommitLocked() {
         PendingTransfer completed = pending;
+        if (completed.deathCounter != null && !saveDeathCountersLocked()) return;
         // Idempotent timer start prevents a restart in this commit window from zeroing an active new run.
         onNewRun.accept(completed.runId);
         consumedGenerations.put(completed.destinationName, completed.destinationGenerationId);
@@ -640,8 +726,7 @@ public final class TransferHandler {
         if (candidate != null && candidate.prepared()) {
             pending.destinationName = ready.get().getServerInfo().getName();
             pending.destinationGenerationId = candidate.generationId();
-            pending.phase = TransferPhase.COUNTDOWN;
-            checkpointLifecycle();
+            checkpointPhaseLocked(TransferPhase.COUNTDOWN);
             sendToSourcesLocked(Protocol.encodePrepareTransfer(), "PREPARE_TRANSFER");
         } else {
             // Old standby worlds are prepared only when a new run needs one,
@@ -673,7 +758,7 @@ public final class TransferHandler {
         List<CompletableFuture<Boolean>> outcomes = new ArrayList<>();
         for (Player player : proxy.getAllPlayers()) {
             String currentServer = player.getCurrentServer().map(connection -> connection.getServerInfo().getName()).orElse(null);
-            if (destinationName.equals(currentServer)) {
+            if (currentServer == null || destinationName.equals(currentServer)) {
                 continue;
             }
             outcomes.add(player.createConnectionRequest(destination.get()).connect().handle((result, error) -> {

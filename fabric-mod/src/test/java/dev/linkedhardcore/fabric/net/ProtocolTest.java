@@ -15,6 +15,23 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class ProtocolTest {
 
     @Test
+    void decodesWorldScopedAcknowledgements() {
+        UUID player = UUID.randomUUID();
+        byte[] generation = "world-a".getBytes(StandardCharsets.UTF_8);
+        byte[] frame = ByteBuffer.allocate(18 + generation.length).put((byte) 0x0a)
+            .putLong(player.getMostSignificantBits()).putLong(player.getLeastSignificantBits())
+            .put((byte) generation.length).put(generation).array();
+        Protocol.Inbound inbound = Protocol.decode(frame);
+        assertTrue(inbound.isAck());
+        assertEquals(player, inbound.playerUuid());
+        assertEquals("world-a", inbound.generationId());
+        assertFalse(Protocol.decode(java.util.Arrays.copyOf(frame, frame.length - 1)).isAck());
+        assertFalse(Protocol.decode(java.util.Arrays.copyOf(frame, frame.length + 1)).isAck());
+        frame[17] = 0;
+        assertFalse(Protocol.decode(java.util.Arrays.copyOf(frame, 18)).isAck());
+    }
+
+    @Test
     void decodesRunTimersAndRejectsMalformedSnapshots() {
         byte[] frame = ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
             .putLong(3_723_456L).put((byte) 1).array();
@@ -41,6 +58,10 @@ class ProtocolTest {
             .array();
 
         assertArrayEquals(expected, Protocol.encodePlayerDied(player));
+        byte[] generation = "world-a".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(ByteBuffer.allocate(18 + generation.length).put(Protocol.OP_WORLD_PLAYER_DIED)
+            .putLong(player.getMostSignificantBits()).putLong(player.getLeastSignificantBits())
+            .put((byte) generation.length).put(generation).array(), Protocol.encodePlayerDied(player, "world-a"));
     }
 
     @Test

@@ -17,6 +17,22 @@ class ProtocolTest {
     private static final UUID PLAYER = UUID.fromString("12345678-1234-5678-9abc-def012345678");
 
     @Test
+    void decodesWorldScopedDeathRetries() {
+        byte[] generation = "world-a".getBytes(StandardCharsets.UTF_8);
+        byte[] frame = ByteBuffer.allocate(18 + generation.length).put((byte) 0x09)
+            .putLong(PLAYER.getMostSignificantBits()).putLong(PLAYER.getLeastSignificantBits())
+            .put((byte) generation.length).put(generation).array();
+        Protocol.Inbound inbound = Protocol.decodeInbound(frame).orElseThrow();
+        assertTrue(inbound.isPlayerDied());
+        assertEquals(PLAYER, inbound.playerUuid());
+        assertEquals("world-a", inbound.generationId());
+        assertFalse(Protocol.decodeInbound(java.util.Arrays.copyOf(frame, frame.length - 1)).isPresent());
+        assertFalse(Protocol.decodeInbound(java.util.Arrays.copyOf(frame, frame.length + 1)).isPresent());
+        frame[17] = 0;
+        assertFalse(Protocol.decodeInbound(java.util.Arrays.copyOf(frame, 18)).isPresent());
+    }
+
+    @Test
     void encodesRunTimeAsMillisecondsAndAnEndedFlag() {
         byte[] expected = ByteBuffer.allocate(10).put(Protocol.OP_RUN_TIMER)
             .putLong(3_723_456L).put((byte) 1).array();
@@ -49,6 +65,10 @@ class ProtocolTest {
             .array();
 
         assertArrayEquals(expected, Protocol.encodeAck(PLAYER));
+        byte[] generation = "world-a".getBytes(StandardCharsets.UTF_8);
+        assertArrayEquals(ByteBuffer.allocate(18 + generation.length).put(Protocol.OP_WORLD_ACK)
+            .putLong(PLAYER.getMostSignificantBits()).putLong(PLAYER.getLeastSignificantBits())
+            .put((byte) generation.length).put(generation).array(), Protocol.encodeAck(PLAYER, "world-a"));
     }
 
     @Test

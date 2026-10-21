@@ -38,10 +38,10 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
         ModConfig config = ModConfig.load();
         LOGGER.info("[linkedhardcore] Initializing for server '{}'", config.serverId());
 
-        ProxyMessenger messenger = new ProxyMessenger(config);
+        StatusFileWriter statusWriter = new StatusFileWriter(config);
+        ProxyMessenger messenger = new ProxyMessenger(config, statusWriter::generationId);
         TransferCountdown transferCountdown = new TransferCountdown(config, messenger);
         messenger.setTransferCountdown(transferCountdown);
-        StatusFileWriter statusWriter = new StatusFileWriter(config);
 
         messenger.register();
         new PlayerDeathListener(messenger).register();
@@ -65,10 +65,10 @@ public final class LinkedHardcoreMod implements DedicatedServerModInitializer {
             writeCurrentStatus(server, statusWriter);
         });
 
-        // Per-tick: warn on un-acked deaths, advance the transfer countdown, and
+        // Per-tick: retry unacknowledged deaths, advance the transfer countdown, and
         // refresh the liveness heartbeat every second.
         ServerTickEvents.END_SERVER_TICK.register(server -> {
-            messenger.checkPendingAcks();
+            messenger.checkPendingAcks(server);
             transferCountdown.tick(server);
             if (++statusHeartbeatTicks[0] >= 20) {
                 statusHeartbeatTicks[0] = 0;

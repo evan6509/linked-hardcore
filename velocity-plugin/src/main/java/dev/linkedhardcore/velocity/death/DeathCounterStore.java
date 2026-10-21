@@ -6,6 +6,7 @@ import com.google.gson.reflect.TypeToken;
 import org.slf4j.Logger;
 
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.lang.reflect.Type;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -56,6 +57,7 @@ public final class DeathCounterStore {
             }
         } catch (IOException e) {
             logger.warn("[linkedhardcore] Could not save death counters to {}: {}", file, e.toString());
+            throw new UncheckedIOException("Could not persist death counters", e);
         }
     }
 }

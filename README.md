@@ -56,8 +56,21 @@ mappings artifact — Loom auto-detects this. Do not add a `mappings` block.
 
 ## Building
 
+Install Java 25 and `jq` before building. The Java regression suite invokes the
+shell reset executor on disposable fixtures, so `jq` is required for tests too.
+
 ```sh
-./gradlew build
+./gradlew --no-daemon --max-workers=1 build
+```
+
+Additional container configuration and storage checks (Python 3.11+ and PyYAML
+are required for the proxy configuration check):
+
+```sh
+bash docker/tests/reset_contract_test.sh
+bash docker/tests/proxy_persistence_test.sh
+python3 docker/tests/proxy_config_test.py
+python3 docker/tests/build_prerequisites_test.py
 ```
 
 Outputs:
@@ -147,7 +160,7 @@ Recommended ports (all on `127.0.0.1`):
 | Server A  | 25566 |
 | Server B  | 25567 |
 
-1. Build (`./gradlew build`), then make three directories:
+1. Build (`./gradlew --no-daemon --max-workers=1 build`), then make three directories:
    `dev-proxy/`, `dev-a/`, `dev-b/`.
 2. **Proxy:** download Velocity 4.0.0, put it in `dev-proxy/velocity.jar`, drop
    `velocity-plugin-0.1.0.jar` into `dev-proxy/plugins/`, and create
@@ -191,8 +204,8 @@ docker compose up -d
 ```
 
 The image build requires network access (gradle deps, Fabric installer + vanilla
-server jar, fabric-api, and the Velocity jar are all downloaded at build time;
-the runtime is then fully offline).
+server jar, fabric-api, and the Velocity jar are all downloaded at build time).
+The proxy also needs access to Minecraft account authentication services at runtime.
 
 ### Environment variables
 
@@ -204,10 +217,14 @@ the runtime is then fully offline).
 | `TRANSFER_COUNTDOWN_SECONDS` | `5` | server | On-screen countdown before the group is transferred (mod `config.json`) |
 | `PROXY_DIR` | `/lh/proxy` | proxy | Runtime directory on the persistent volume; the image install remains separate |
 | `MC_MEMORY` | proxy `512M`, servers `3G` | both | JVM `-Xmx` |
-| `VELOCITY_PORT` | `25577` | proxy | Proxy bind port and host port mapping |
+| `VELOCITY_PORT` | `25577` | Compose | Host port published to the proxy's fixed container port `25577` |
 
 `FORWARDING_SECRET` is read from `.env` (gitignored; see `.env.example`). The
 dev default works out of the box but is not secret.
+
+The generated proxy authenticates Minecraft accounts. Compose publishes the
+selected `VELOCITY_PORT` on the host and keeps the container listener at `25577`.
+The backends remain in offline mode for Velocity's authenticated forwarding.
 
 ### How the reset loop works in containers
 

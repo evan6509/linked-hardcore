@@ -25,7 +25,7 @@ source world in survival.
 | Countdown | On proxy restart, return to waiting and replay preparation. If everybody is offline, commit a verified fresh destination without requiring a plugin-message carrier. An unavailable reservation is released so another fresh destination can be selected. |
 | Connecting | On restart, enter recovery and retain the exact reserved destination generation; players may already have entered it. |
 | Recovering | Preserve worlds while players remain connected. Once all configured backends are empty, finish the handoff to the reserved generation when its heartbeat is healthy. |
-| Committing | Restore the matching current-world pointer, start the same timer run ID idempotently, and persist source-reset cleanup. |
+| Committing | Restore the accepted counter even if its separate store is unavailable. Retain the journal and retry until the counter is durable, then start the same timer run ID idempotently and persist source-reset cleanup. |
 
 The timer checkpoint also carries the run ID. Replaying a commit for that same ID
 preserves elapsed time. If the timer file belongs to the previous source run, the
@@ -85,7 +85,7 @@ already-used world.
 ```sh
 bash docker/tests/proxy_persistence_test.sh
 bash docker/tests/reset_contract_test.sh
-./gradlew build
+./gradlew --no-daemon --max-workers=1 build
 ```
 
 The storage fixture models replacement of the image directory while retaining the

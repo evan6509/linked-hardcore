@@ -51,6 +51,7 @@ All integers are big-endian.
 ### `PLAYER_DIED` — opcode `0x01` (mod → proxy)
 
 Sent when any player dies on this server.
+This legacy frame remains readable; updated mods send `WORLD_PLAYER_DIED` below.
 
 ```
 byte[1]   opcode = 0x01
@@ -58,8 +59,10 @@ byte[16]  playerUuid (the player who died)
 ```
 
 Proxy behaviour (`TransferHandler#onPlayerDied`):
-1. Replies `ACK` on the same connection (unconditionally).
-2. Records the proxy-authoritative death total and broadcasts `DEATH_COUNTERS`.
+1. Checkpoints the ended world, pending transfer, and accepted death before replying `ACK`.
+   A rejected checkpoint or missing world identity receives no ACK and can be retried.
+2. Records the proxy-authoritative death total and broadcasts `DEATH_COUNTERS`. The
+   accepted record stays in the lifecycle journal until the counter store is durable.
 3. Includes every occupied backend in one transfer; if no empty `READY` backend exists,
    sends `WAIT_FOR_SERVER` and holds the transfer pending.
 4. On `TRANSFER_READY` (sent after the countdown), transfers every player to the chosen
@@ -89,8 +92,8 @@ byte[1]   opcode = 0x03
 varint    serverId (e.g. "a" or "b")
 ```
 
-The proxy resolves `serverId` → velocity server name via its config and flips the
-server state back to `READY` (idempotent).
+The proxy resolves `serverId` → velocity server name and revalidates the backend's
+files before accepting readiness.
 
 > Note: this message is best-effort. When a freshly-reset server has zero players
 > there is no live connection carrying our channel, so the message may not arrive.
@@ -105,6 +108,37 @@ Acknowledges a received `PLAYER_DIED`, correlated by the original player's UUID.
 byte[1]   opcode = 0x04
 byte[16]  playerUuid (the player from the PLAYER_DIED being acked)
 ```
+
+### `WORLD_PLAYER_DIED` — opcode `0x09` (mod → proxy)
+
+Updated mods report and retry a death with its world generation:
+
+```
+byte[1]   opcode = 0x09
+byte[16]  playerUuid
+varint    generationId UTF-8 byte length
+byte[]    generationId UTF-8 bytes
+```
+
+The generation is nonblank, at most 32,767 characters, and must match the backend's
+durable identity. Malformed or trailing data is rejected. Missing identity or a
+failed lifecycle checkpoint leaves the event unacknowledged. Retries for an accepted
+source world are acknowledged without recounting. Delayed events from retired or
+replaced generations cannot end the new run, including after proxy restart.
+An event from the destination while the previous handoff is still active waits
+unacknowledged until that handoff commits.
+
+### `WORLD_ACK` — opcode `0x0a` (proxy → mod)
+
+```
+byte[1]   opcode = 0x0a
+byte[16]  playerUuid
+varint    generationId UTF-8 byte length
+byte[]    generationId UTF-8 bytes
+```
+
+Only an ACK matching both the pending player's UUID and generation clears a
+world-scoped death. A legacy `ACK` cannot clear a world-scoped event.
 
 ### `TRANSFER_READY` — opcode `0x05` (mod → proxy)
 
@@ -168,11 +202,14 @@ transfers do not reset the timer.
 `ServerPlayNetworking#send` does **not** verify the receiving side registered the
 channel — a misconfigured channel fails silently. To avoid a silent black hole:
 
-- The mod records every `PLAYER_DIED` (playerUuid → sent timestamp) as pending.
-- On `ACK` receipt it clears the entry and logs the round-trip time.
+- The mod retains each `WORLD_PLAYER_DIED` frame, its generation, and last send time.
+- On a matching `WORLD_ACK` it clears the entry and logs the round-trip time.
 - On each server tick (`ServerTickEvents.END_SERVER_TICK`) entries older than
-  `ackTimeoutSeconds` (default 10, configurable) trigger a log error naming the
-  likely misconfiguration and are then dropped (warn once, not every tick).
+  `ackTimeoutSeconds` (default 10, configurable) are retried with the same identity
+  and bytes. A currently connected player carries the retry, including after the
+  original player respawns or disconnects. If no carrier exists, the entry remains
+  pending until one is available. This queue is in memory for the backend JVM's
+  lifetime; it does not survive a backend restart before proxy acceptance.
 
 A single ack round-trip therefore proves **both** directions are healthy:
 - mod→proxy (payload registered in `clientboundPlay`; channel in proxy `ChannelRegistrar`)
@@ -183,3 +220,6 @@ A single ack round-trip therefore proves **both** directions are healthy:
 Opcodes are stable and must never be reused for a different message. If the
 protocol changes incompatibly, bump a `PROTOCOL_VERSION` constant on both sides
 and document it here.
+
+`PROTOCOL_VERSION` is now 2. Legacy opcodes remain readable. Upgrade the proxy and
+all backend mods together to enable world-scoped death retry and acknowledgement.

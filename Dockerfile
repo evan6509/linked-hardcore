@@ -13,11 +13,16 @@
 # ---- Stage 1: gradle build -----------------------------------------------
 FROM eclipse-temurin:25-jdk AS build
 
+# Java regressions invoke the reset executor on disposable fixtures.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends jq \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /src
 COPY . .
 
 # JAVA_HOME is set in the temurin image; gradlew picks it up.
-RUN ./gradlew --no-daemon build
+RUN ./gradlew --no-daemon --max-workers=1 build
 
 RUN mkdir -p /out \
     && cp fabric-mod/build/libs/fabric-mod-0.1.0.jar /out/fabric-mod-0.1.0.jar \

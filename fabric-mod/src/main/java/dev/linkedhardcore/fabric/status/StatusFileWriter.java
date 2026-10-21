@@ -56,6 +56,16 @@ public final class StatusFileWriter {
         }
     }
 
+    /** Returns the executor's world identity for death retry correlation. */
+    public synchronized String generationId() {
+        try {
+            initialize();
+            return world.generationId;
+        } catch (IOException e) {
+            throw new IllegalStateException("Could not identify the death's world generation", e);
+        }
+    }
+
     /** Called on the server thread before the first arriving player enters play. */
     public synchronized void markWorldUsed() {
         try {

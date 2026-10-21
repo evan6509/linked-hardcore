@@ -92,8 +92,9 @@ agent, then becomes ready to receive the next transfer. Ping-pong forever.
   online player is set to spectator and sees an on-screen action-bar countdown,
   then the mod sends `TRANSFER_READY` so the proxy moves everyone. On the JOIN
   event, players arriving in spectator are respawned into survival.
-- **Reliability.** `ProxyMessenger` tracks pending `PLAYER_DIED`s; un-acked
-  entries trigger a warning after `ackTimeoutSeconds` (see `PROTOCOL.md`).
+- **Reliability.** `ProxyMessenger` retains and retries unacknowledged world-scoped
+  deaths after `ackTimeoutSeconds`, using a current player connection. UUID and
+  generation correlation prevents delayed retries from ending a later run (see `PROTOCOL.md`).
 - **Status reporting.** `StatusFileWriter` atomically refreshes `status.json`
   every second and on lifecycle events. The mod never touches world/playerdata
   files.

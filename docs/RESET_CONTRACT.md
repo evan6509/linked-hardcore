@@ -96,6 +96,15 @@ heartbeat cannot cancel the latch during this gap, while the backend is unavaila
 or after a proxy restart. Failed request publication is retried with the same ID.
 A conflicting or malformed durable expectation prevents readiness.
 
+If a backend restarts between identity capture and request publication, the proxy
+may rebind only `previousBootId` to its replacement boot. This requires a fresh,
+empty `resetting` heartbeat for the same previous generation, an empty proxy-side
+backend, and pending/request files agreeing on every field except the boot ID.
+The request ID, previous generation, and request time stay unchanged. The pending
+expectation is written first; interrupted request publication is retried with that
+same reset identity. Changed worlds, occupied or stale backends, and conflicting
+requests never qualify. The executor still requires an exact boot match.
+
 ## Executor sequence
 
 1. Require a schema-2 request for this backend. Before stopping a running JVM,
@@ -145,7 +154,7 @@ identity and durable expectation, and expose equivalent verified completion.
 ## Isolated validation
 
 ```sh
-./gradlew clean build
+./gradlew --no-daemon --max-workers=1 build
 bash docker/tests/reset_contract_test.sh
 bash docker/tests/proxy_persistence_test.sh
 # Requires an already cached Fabric installation; creates a disposable localhost backend:

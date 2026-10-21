@@ -67,6 +67,7 @@ import java.util.UUID;
 public final class Protocol {
 
     public static final String CHANNEL_NAME = "linkedhardcore:main";
+    public static final int PROTOCOL_VERSION = 2;
     public static final ChannelIdentifier CHANNEL = MinecraftChannelIdentifier.from(CHANNEL_NAME);
 
     public static final byte OP_PLAYER_DIED = 0x01;
@@ -77,6 +78,8 @@ public final class Protocol {
     public static final byte OP_WAIT_FOR_SERVER = 0x06;
     public static final byte OP_DEATH_COUNTERS = 0x07;
     public static final byte OP_RUN_TIMER = 0x08;
+    public static final byte OP_WORLD_PLAYER_DIED = 0x09;
+    public static final byte OP_WORLD_ACK = 0x0a;
 
     private Protocol() {
     }
@@ -86,9 +89,9 @@ public final class Protocol {
     }
 
     /** A decoded inbound message from a backend server. */
-    public record Inbound(byte opcode, UUID playerUuid, String serverId) {
+    public record Inbound(byte opcode, UUID playerUuid, String serverId, String generationId) {
         public boolean isPlayerDied() {
-            return opcode == OP_PLAYER_DIED;
+            return opcode == OP_PLAYER_DIED || opcode == OP_WORLD_PLAYER_DIED;
         }
 
         public boolean isResetComplete() {
@@ -109,9 +112,15 @@ public final class Protocol {
             DataInputStream in = new DataInputStream(new ByteArrayInputStream(data));
             byte opcode = in.readByte();
             return switch (opcode) {
-                case OP_PLAYER_DIED -> Optional.of(new Inbound(opcode, readUuid(in), null));
-                case OP_RESET_COMPLETE -> Optional.of(new Inbound(opcode, null, readString(in)));
-                case OP_TRANSFER_READY -> Optional.of(new Inbound(opcode, null, null));
+                case OP_PLAYER_DIED -> Optional.of(new Inbound(opcode, readUuid(in), null, null));
+                case OP_WORLD_PLAYER_DIED -> {
+                    UUID player = readUuid(in);
+                    String generation = readString(in);
+                    yield !generation.isBlank() && generation.length() <= 32_767 && in.available() == 0
+                        ? Optional.of(new Inbound(opcode, player, null, generation)) : Optional.empty();
+                }
+                case OP_RESET_COMPLETE -> Optional.of(new Inbound(opcode, null, readString(in), null));
+                case OP_TRANSFER_READY -> Optional.of(new Inbound(opcode, null, null, null));
                 default -> {
                     // Unknown opcode — protocol drift between mod and plugin. Surface it rather than silently ignore.
                     yield Optional.empty();
@@ -141,6 +150,19 @@ public final class Protocol {
         ByteArrayDataOutput out = ByteStreams.newDataOutput();
         out.writeByte(OP_ACK);
         writeUuid(out, playerUuid);
+        return out.toByteArray();
+    }
+
+    /** ACK the exact world-scoped event, retaining the legacy encoder for older senders. */
+    public static byte[] encodeAck(UUID playerUuid, String generationId) {
+        if (generationId == null) return encodeAck(playerUuid);
+        if (generationId.isBlank() || generationId.length() > 32_767) {
+            throw new IllegalArgumentException("Invalid death world generation");
+        }
+        ByteArrayDataOutput out = ByteStreams.newDataOutput();
+        out.writeByte(OP_WORLD_ACK);
+        writeUuid(out, playerUuid);
+        writeString(out, generationId);
         return out.toByteArray();
     }
 
