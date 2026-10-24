@@ -52,27 +52,30 @@ for other Minecraft targets):
 
 | Component          | Version |
 |--------------------|---------|
-| Minecraft          | 26.2 |
+| Minecraft          | 26.2 (default), 26.3 (selectable) |
 | Fabric Loader      | 0.19.3 |
 | Fabric Loom        | 1.17-SNAPSHOT (1.17 line) |
-| Fabric API         | 0.156.0+26.2 |
+| Fabric API         | 0.156.0+26.2 / 0.165.0+26.3 respectively |
 | Java               | 25 (repository compile/runtime target) |
 | Velocity           | 4.0.0 |
 | FabricProxy-Lite   | 2.12.0 (bundled into the mod jar, MIT license) |
 
-Only Minecraft **26.2** is targeted by the build and Docker installer. The mod
-metadata uses `minecraft >=26.2`; that lower-bound predicate does not establish
-26.3 compatibility.
+The Fabric backend builds separately for **26.2** and **26.3** from the same
+sources. Each JAR declares its own Minecraft minor line (`~26.2` or `~26.3`) and
+matching Fabric API minimum. Use the matching JAR and API on every backend;
+this does not establish mixed-version client/proxy interoperability. Docker
+continues to build and install **26.2** by default; its behavior is unchanged.
 
 **Mappings note:** the current MC line (26.x) ships with Mojang's official
-mappings baked into the game jar. There is no yarn for 26.2 and no separate
+mappings baked into the game jar. There is no yarn for these targets and no separate
 mappings artifact — Loom auto-detects this. Do not add a `mappings` block.
 
 ## Releases and verification
 
 As checked on **2026-10-24**, this repository has no published GitHub Releases.
-The tracked tree also has no GitHub Actions build, artifact-upload, or release
-workflow, so there is no automated release download path. Build the current
+The build workflow now checks both Minecraft targets and uploads build/test
+artifacts on pushes and pull requests. It does not publish releases, and a local
+successful build is not evidence that GitHub Actions has run. Build the current
 `codex/development` branch locally using the commands below. Version `0.1.0` in
 artifact names is the project build version, not evidence of a published release.
 Changes reach `main` through review of a `codex/development` pull request.
@@ -82,7 +85,9 @@ Changes reach `main` through review of a `codex/development` pull request.
 [Recorded validation](docs/BUG_FIX_VALIDATION.md) reports an earlier Java build,
 automated regressions, disposable executor/storage fixtures, and a disposable
 Minecraft 26.2 backend reset smoke test. Those records are distinct from checks
-run for this README audit and are not a fresh CI result for this HEAD. Production
+run for this change. The current [dual-target validation](docs/FABRIC_COMPATIBILITY.md)
+records local builds, JUnit/JAR checks and EULA-gated loading for both targets;
+it is not a CI result. Production
 deployment, live multiplayer transfers, death-screen respawn, and client display
 remain unverified; the storage fixture is not a real Docker recreation test.
 
@@ -92,8 +97,20 @@ Install Java 25 and `jq` before building. The Java regression suite invokes the
 shell reset executor on disposable fixtures, so `jq` is required for tests too.
 
 ```sh
+# Default 26.2 (also used by Docker):
 ./gradlew --no-daemon --max-workers=1 build
+# 26.3; selects Fabric API 0.165.0+26.3 automatically:
+./gradlew --no-daemon --max-workers=1 -Pminecraft_version=26.3 build
+# Build and verify installable JAR metadata and nested FabricProxy-Lite:
+bash scripts/package_target.sh 26.2
+bash scripts/package_target.sh 26.3
 ```
+
+Run target builds sequentially in the same checkout. Fabric 26.3 outputs and test
+reports are isolated under `fabric-mod/build/26.3/`; 26.2 retains `fabric-mod/build/`.
+Unsupported targets and mismatched explicit `fabric_api_version` overrides fail
+configuration. See [dual-target validation](docs/FABRIC_COMPATIBILITY.md) for
+metadata/API evidence and the limits of automated validation.
 
 Additional container configuration and storage checks (Python 3.11+ and PyYAML
 are required for the proxy configuration check):
@@ -109,7 +126,8 @@ Outputs:
 
 | Artifact | Path |
 |----------|------|
-| Fabric mod (bundles FabricProxy-Lite) | `fabric-mod/build/libs/fabric-mod-0.1.0.jar` |
+| Fabric mod for 26.2 (bundles FabricProxy-Lite) | `fabric-mod/build/libs/fabric-mod-0.1.0.jar` |
+| Fabric mod for 26.3 (bundles FabricProxy-Lite) | `fabric-mod/build/26.3/libs/fabric-mod-mc26.3-0.1.0.jar` |
 | Velocity plugin | `velocity-plugin/build/libs/velocity-plugin-0.1.0.jar` |
 
 ## Setup
@@ -118,10 +136,11 @@ Outputs:
 
 For **each** backend server, in its own directory:
 
-1. Set up a Fabric server for MC 26.2 (build pin: loader 0.19.3), Java 25.
-2. Install Fabric API `0.156.0+26.2` in `mods/`, alongside
-   `fabric-mod-0.1.0.jar`. Only FabricProxy-Lite is bundled inside the Linked
-   Hardcore jar; it needs no separate install. Fabric API is not bundled.
+1. Set up a Fabric server for MC 26.2 or 26.3 (build pin: loader 0.19.3), Java 25.
+2. Install the matching Fabric API in `mods/`: `0.156.0+26.2` with
+   `fabric-mod-0.1.0.jar` for 26.2, or `0.165.0+26.3` with
+   `fabric-mod-mc26.3-0.1.0.jar` for 26.3. Only FabricProxy-Lite is bundled inside
+   the Linked Hardcore jar; it needs no separate install. Fabric API is not bundled.
 3. Set `online-mode=false` in `server.properties`.
 4. Launch once. It will generate:
    - `config/FabricProxy-Lite.toml`

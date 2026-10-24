@@ -16,6 +16,25 @@ repositories {
     mavenCentral()
 }
 
+// The default tuple and artifact path remain compatible with the Docker installer.
+val minecraftTarget = providers.gradleProperty("minecraft_version").get()
+val targetApiVersion = when (minecraftTarget) {
+    "26.2" -> "0.156.0+26.2"
+    "26.3" -> "0.165.0+26.3"
+    else -> error("Unsupported Minecraft target: $minecraftTarget (choose 26.2 or 26.3)")
+}
+val loaderVersion = providers.gradleProperty("loader_version").get()
+require(providers.gradleProperty("fabric_api_version").orElse(targetApiVersion).get() == targetApiVersion) {
+    "Minecraft $minecraftTarget requires fabric_api_version=$targetApiVersion"
+}
+// Isolate compiled classes, test reports and resources when switching targets.
+if (minecraftTarget != "26.2") {
+    layout.buildDirectory.set(layout.projectDirectory.dir("build/$minecraftTarget"))
+    tasks.withType<Jar>().configureEach {
+        archiveBaseName.set("fabric-mod-mc$minecraftTarget")
+    }
+}
+
 dependencies {
     testImplementation("org.mockito:mockito-core:5.15.2")
     // Exercise the actual wire sender/receiver together; production modules stay independent.
@@ -25,8 +44,8 @@ dependencies {
     // NOTE: `implementation`, NOT `modImplementation` — in Loom 1.17's
     // non-obfuscated mode `modImplementation` no longer exists; the example mod
     // uses plain `implementation` for mods.
-    implementation("net.fabricmc:fabric-loader:${property("loader_version")}")
-    implementation("net.fabricmc.fabric-api:fabric-api:${property("fabric_api_version")}")
+    implementation("net.fabricmc:fabric-loader:${loaderVersion}")
+    implementation("net.fabricmc.fabric-api:fabric-api:${targetApiVersion}")
 
     // FabricProxy-Lite — bundled into THIS jar (Jar-in-Jar) so the operator only
     // drops one jar into each server's mods/ folder. It still runs as its own mod
@@ -47,8 +66,14 @@ loom {
 tasks.named<ProcessResources>("processResources") {
     val version = project.version.toString()
     inputs.property("version", version)
+    inputs.property("minecraftTarget", minecraftTarget)
+    inputs.property("fabricApiVersion", targetApiVersion)
+    inputs.property("loaderVersion", loaderVersion)
     filesMatching("fabric.mod.json") {
-        expand("version" to version)
+        expand("version" to version,
+            "minecraft" to "~$minecraftTarget",
+            "fabricApi" to ">=$targetApiVersion",
+            "loader" to ">=${loaderVersion}")
     }
 }
 
